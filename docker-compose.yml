@@ -19,6 +19,10 @@ services:
       OVERPASS_MODE: ${OVERPASS_MODE:-init}
       OVERPASS_META: ${OVERPASS_META:-yes}
       OVERPASS_PLANET_URL: "file:///data/osm/region.pbf"
+      # The wiktorn image saves the downloaded planet as /db/planet.osm.bz2
+      # regardless of its real format, then pipes it through bzcat. Our source
+      # is PBF, so convert it to bz2 with osmium before the importer runs.
+      OVERPASS_PLANET_PREPROCESS: "mv /db/planet.osm.bz2 /db/planet.osm.pbf && osmium cat -o /db/planet.osm.bz2 /db/planet.osm.pbf && rm /db/planet.osm.pbf"
       # Leave blank to disable automatic network-based diff fetching
       OVERPASS_DIFF_URL: ${OVERPASS_DIFF_URL:-}
       OVERPASS_RULES_LOAD: "10"
@@ -38,7 +42,7 @@ services:
 
   # ── GraphHopper (Israel Hiking Maps build) ───────────────────
   graphhopper:
-    image: israelhiking/graphhopper:latest
+    image: israelhikingmap/graphhopper:latest
     container_name: graphhopper
     restart: unless-stopped
     environment:
@@ -46,7 +50,9 @@ services:
     volumes:
       - osm-data:/data/osm:ro                        # read PBF
       - ./data/default-gh:/data/default-gh           # pre-built graph cache (bind-mount)
-      - ./graphhopper/config.yml:/graphhopper/config.yml:ro
+      # IHM image entrypoint runs `./graphhopper.sh -c config-example.yml`,
+      # so override that file (not config.yml, which the image ignores).
+      - ./graphhopper/config.yml:/graphhopper/config-example.yml:ro
     networks:
       - geo-net
     healthcheck:
