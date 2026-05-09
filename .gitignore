@@ -17,6 +17,10 @@ data/tiles/*.pmtiles
 data/tiles/*.mbtiles
 !data/tiles/.gitkeep
 
+# Planetiler caches (auxiliary datasets + tmp working dir)
+data/sources/
+data/tmp/
+
 # Frontend JS vendored by scripts/fetch-frontend-vendor.sh
 api/app/static/vendor/*.js
 api/app/static/vendor/*.css
