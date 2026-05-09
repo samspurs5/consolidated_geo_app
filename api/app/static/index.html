@@ -145,6 +145,7 @@
       route: { layers: ["route"], source: "route" },
       iso:   { layers: ["iso-fill", "iso-outline"], source: "iso" },
       ovp:   { layers: ["ovp-lines", "ovp-points"], source: "ovp" },
+      tour:  { layers: ["tour-line", "tour-stops"], source: "tour" },
     };
 
     const removeOverlay = key => {
@@ -171,6 +172,12 @@
           paint: { "line-color": "#093", "line-width": 2 } },
         { id: "ovp-points", type: "circle", filter: ["==", ["geometry-type"], "Point"],
           paint: { "circle-radius": 5, "circle-color": "#093", "circle-stroke-color": "#fff", "circle-stroke-width": 1 } },
+      ],
+      tour: [
+        { id: "tour-line",  type: "line",   filter: ["==", ["geometry-type"], "LineString"],
+          paint: { "line-color": "#a05", "line-width": 4, "line-opacity": 0.85 } },
+        { id: "tour-stops", type: "circle", filter: ["==", ["geometry-type"], "Point"],
+          paint: { "circle-radius": 7, "circle-color": "#a05", "circle-stroke-color": "#fff", "circle-stroke-width": 2 } },
       ],
     };
     const drawOverlay = (kind, geojson) => setOverlay(kind, geojson, LAYER_DEFS[kind]);
