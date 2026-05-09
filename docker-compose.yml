@@ -104,6 +104,7 @@ services:
       GRAPHHOPPER_CACHE_DIR: "/data/default-gh"
     volumes:
       - osm-data:/data/osm              # read + write (delta application)
+      - ./data/tiles:/data/tiles:ro     # vector tiles (.pmtiles) for the frontend
       - /var/run/docker.sock:/var/run/docker.sock   # restart sibling containers
     ports:
       - "${API_PORT:-8000}:8000"

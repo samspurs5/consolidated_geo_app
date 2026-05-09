@@ -1,7 +1,10 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .routers import data, overpass, route
@@ -36,13 +39,31 @@ async def health():
     return {"status": "ok"}
 
 
-@app.get("/", tags=["meta"])
-async def root():
+@app.get("/api", tags=["meta"])
+async def api_root():
     return {
         "endpoints": {
             "routing":  "/route",
             "overpass": "/overpass",
             "data":     "/data",
             "docs":     "/docs",
+            "ui":       "/ui/",
         }
     }
+
+
+# Static frontend (MapLibre + pmtiles). Bundled into the api image at build time.
+_static_dir = Path(__file__).parent / "static"
+if _static_dir.is_dir():
+    app.mount("/ui", StaticFiles(directory=str(_static_dir), html=True), name="ui")
+
+# Vector tiles file produced by scripts/build-tiles.sh, bind-mounted from the host.
+# Served with HTTP range support so MapLibre can read pmtiles directly.
+_tiles_dir = Path("/data/tiles")
+if _tiles_dir.is_dir():
+    app.mount("/tiles", StaticFiles(directory=str(_tiles_dir)), name="tiles")
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    return RedirectResponse(url="/ui/")

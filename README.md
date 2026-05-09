@@ -4,7 +4,8 @@ Self-hosted, **offline-first** geo stack:
 
 - **GraphHopper** (routing) — `localhost:8989`
 - **Overpass API** (OSM querying) — `localhost/api/interpreter`
-- **FastAPI** unified frontend with delta-update orchestration — `localhost:8000`
+- **FastAPI** unified backend with delta-update orchestration — `localhost:8000`
+- **MapLibre + pmtiles** static frontend served by the FastAPI service — `localhost:8000/ui/`
 
 Both data services ingest from a single source of truth — `data/osm/region.pbf` —
 and stay in sync via `osmium apply-changes` on local `.osc` / `.osc.gz` files.
@@ -62,6 +63,46 @@ curl -s -G --data-urlencode \
   http://localhost/api/interpreter | jq '.elements[0].tags'
 # { "nodes": "90", "ways": "0", "relations": "0", "total": "90" }
 ```
+
+---
+
+## Frontend (optional)
+
+A minimal MapLibre-based UI is bundled with the api service at
+`http://localhost:8000/ui/`. Click two points on the map, pick a profile, hit
+**Find route** — it calls `/route` and draws the GeoJSON the GraphHopper
+backend returns.
+
+The map itself is rendered client-side from a single `.pmtiles` file built
+from the **same `data/osm/region.pbf`** you already have. No tile server
+needed.
+
+```bash
+# 1. Fetch the JS deps once on a connected machine (MapLibre + pmtiles).
+#    They're bundled into the api image at build time.
+./scripts/fetch-frontend-vendor.sh
+
+# 2. Build vector tiles from the current PBF (uses planetiler in Docker).
+./scripts/build-tiles.sh
+# → data/tiles/region.pmtiles
+
+# 3. (Re)start the stack.
+docker compose up -d --build api
+
+# 4. Open the UI.
+open http://localhost:8000/ui/
+```
+
+The pmtiles file is served by FastAPI's static handler with HTTP Range
+support, so MapLibre fetches only the tiles in view (no preloading the whole
+file). Restart `api` after rebuilding tiles — `data/tiles/` is bind-mounted,
+so no rebuild needed for tile changes, just a container restart to clear any
+caches.
+
+The included `style.json` is a no-text minimal style (water, landcover,
+roads, buildings, boundaries) so it works fully offline without any font or
+sprite assets. If you want labels, add a glyph URL pointing at a local font
+mirror.
 
 ---
 
@@ -165,15 +206,20 @@ curl -s -G --data-urlencode \
 │   ├── osm/
 │   │   ├── region.pbf          # Source of truth (gitignored)
 │   │   └── updates/            # Drop .osc / .osc.gz files here
-│   └── default-gh/             # GraphHopper's CH graph cache
+│   ├── default-gh/             # GraphHopper's CH graph cache
+│   └── tiles/
+│       └── region.pmtiles      # Vector tiles for the frontend (gitignored)
 ├── graphhopper/
 │   └── config.yml              # v12-compatible, SRTM disabled (offline)
 ├── api/                        # FastAPI: routing + overpass + delta orchestration
+│   └── app/static/             # MapLibre frontend (HTML + style + JS deps)
 └── scripts/
-    ├── download-extract.sh     # Fetch a Geofabrik PBF + state.txt
-    ├── apply-local-delta.sh    # Apply .osc files via host osmium
-    ├── save-images.sh          # Bundle images for air-gapped transfer
-    └── load-images.sh          # Restore images on the air-gapped host
+    ├── download-extract.sh         # Fetch a Geofabrik PBF + state.txt
+    ├── apply-local-delta.sh        # Apply .osc files via host osmium
+    ├── build-tiles.sh              # Build .pmtiles from region.pbf via planetiler
+    ├── fetch-frontend-vendor.sh    # Download MapLibre + pmtiles JS deps
+    ├── save-images.sh              # Bundle images for air-gapped transfer
+    └── load-images.sh              # Restore images on the air-gapped host
 ```
 
 ---
@@ -220,16 +266,19 @@ tarball, then load on the target.
 ```bash
 # === On a connected machine ===
 docker compose pull            # overpass + graphhopper from Docker Hub
-docker compose build api       # api image (apt + pip install run here)
-./scripts/save-images.sh       # → geo-stack-images.tar.gz (~1 GB)
+./scripts/fetch-frontend-vendor.sh  # MapLibre + pmtiles JS into api/app/static/vendor/
+docker compose build api       # bundles vendor JS into the api image
+./scripts/save-images.sh       # → geo-stack-images.tar.gz
 
-# Optional: bundle a fresh PBF too
+# Optional: bundle a PBF + pre-built tiles too (so first boot is instant)
 ./scripts/download-extract.sh https://download.geofabrik.de/europe/monaco-latest.osm.pbf
+./scripts/build-tiles.sh       # → data/tiles/region.pmtiles
 
 # === Transfer to the air-gapped host ===
-# - this repository
+# - this repository (with api/app/static/vendor/ populated)
 # - geo-stack-images.tar.gz
 # - data/osm/region.pbf
+# - data/tiles/region.pmtiles  (optional, otherwise rebuild on the host)
 
 # === On the air-gapped host ===
 ./scripts/load-images.sh       # docker load < geo-stack-images.tar.gz
