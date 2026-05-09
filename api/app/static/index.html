@@ -11,41 +11,64 @@
     #panel {
       position: absolute; top: 12px; left: 12px; z-index: 1;
       background: white; padding: 12px 14px; border-radius: 6px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.15); width: 280px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15); width: 300px;
     }
     #panel h1 { font-size: 14px; margin: 0 0 8px 0; }
     #panel label { display: block; font-size: 12px; color: #555; margin-top: 6px; }
-    #panel input, #panel select {
+    #panel input, #panel select, #panel textarea {
       width: 100%; box-sizing: border-box; padding: 4px 6px;
       font-family: monospace; font-size: 12px;
     }
-    #panel button {
-      margin-top: 10px; padding: 6px 12px; font-size: 13px;
-      cursor: pointer; border: 1px solid #888; background: #f4f4f4; border-radius: 4px;
+    #panel textarea { resize: vertical; height: 60px; }
+    .row { display: flex; gap: 6px; }
+    .row > * { flex: 1; }
+    .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .actions button {
+      padding: 5px 10px; font-size: 12px; cursor: pointer;
+      border: 1px solid #888; background: #f4f4f4; border-radius: 4px;
     }
-    #panel button:hover { background: #e8e8e8; }
+    .actions button:hover { background: #e8e8e8; }
     #status { margin-top: 8px; font-size: 12px; color: #444; min-height: 1em; }
     #status.error { color: #c00; }
-    .pin-hint { font-size: 11px; color: #888; margin-top: 4px; }
+    .hint { font-size: 11px; color: #888; margin-top: 4px; }
   </style>
 </head>
 <body>
   <div id="panel">
-    <h1>Route</h1>
+    <h1>OSM Geo App</h1>
+
     <label>From <small style="color:#888">(lat, lng)</small></label>
     <input id="from" placeholder="click on map" />
     <label>To</label>
-    <input id="to" placeholder="click on map" />
-    <label>Profile</label>
-    <select id="profile">
-      <option value="car">car</option>
-      <option value="foot">foot</option>
-      <option value="bike">bike</option>
-    </select>
-    <button id="route-btn">Find route</button>
-    <button id="clear-btn">Clear</button>
+    <input id="to" placeholder="click on map (route only)" />
+
+    <div class="row">
+      <div>
+        <label>Profile</label>
+        <select id="profile">
+          <option value="car">car</option>
+          <option value="foot">foot</option>
+          <option value="bike">bike</option>
+        </select>
+      </div>
+      <div>
+        <label>Iso minutes</label>
+        <input id="minutes" type="number" min="1" value="10" />
+      </div>
+    </div>
+
+    <label>Overpass QL <small style="color:#888">({{bbox}} = visible map)</small></label>
+    <textarea id="ql">node[amenity=restaurant]({{bbox}});out body;</textarea>
+
+    <div class="actions">
+      <button id="route-btn">Route</button>
+      <button id="iso-btn">Isochrone</button>
+      <button id="ovp-btn">Overpass</button>
+      <button id="clear-btn">Clear</button>
+    </div>
+
     <div id="status"></div>
-    <div class="pin-hint">Tip: click the map to set From, click again for To.</div>
+    <div class="hint">Click map to set From, click again for To.</div>
   </div>
   <div id="map"></div>
 
@@ -70,6 +93,14 @@
     const toInput = document.getElementById("to");
 
     const fmt = ll => `${ll.lat.toFixed(6)}, ${ll.lng.toFixed(6)}`;
+    const parsePt = s => {
+      const m = (s || "").match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
+      return m ? [parseFloat(m[1]), parseFloat(m[2])] : null;
+    };
+    const setStatus = (text, isError = false) => {
+      statusEl.textContent = text;
+      statusEl.classList.toggle("error", !!isError);
+    };
 
     map.on("click", e => {
       if (!fromLngLat) {
@@ -83,64 +114,120 @@
       }
     });
 
+    // ── overlay management ───────────────────────────────────────
+    const OVERLAYS = {
+      route: { layers: ["route"], source: "route" },
+      iso:   { layers: ["iso-fill", "iso-outline"], source: "iso" },
+      ovp:   { layers: ["ovp-lines", "ovp-points"], source: "ovp" },
+    };
+
+    const removeOverlay = key => {
+      for (const id of OVERLAYS[key].layers) if (map.getLayer(id)) map.removeLayer(id);
+      if (map.getSource(OVERLAYS[key].source)) map.removeSource(OVERLAYS[key].source);
+    };
+
+    const setOverlay = (key, geojson, layerDefs) => {
+      removeOverlay(key);
+      map.addSource(OVERLAYS[key].source, { type: "geojson", data: geojson });
+      for (const def of layerDefs) map.addLayer({ ...def, source: OVERLAYS[key].source });
+    };
+
     document.getElementById("clear-btn").onclick = () => {
       fromLngLat = toLngLat = null;
       fromInput.value = toInput.value = "";
       if (fromMarker) { fromMarker.remove(); fromMarker = null; }
       if (toMarker) { toMarker.remove(); toMarker = null; }
-      if (map.getLayer("route")) map.removeLayer("route");
-      if (map.getSource("route")) map.removeSource("route");
-      statusEl.textContent = "";
-      statusEl.classList.remove("error");
+      for (const k of Object.keys(OVERLAYS)) removeOverlay(k);
+      setStatus("");
     };
 
+    // ── 1. Route ─────────────────────────────────────────────────
     document.getElementById("route-btn").onclick = async () => {
-      statusEl.classList.remove("error");
-      const parse = s => {
-        const m = s.match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
-        return m ? [parseFloat(m[1]), parseFloat(m[2])] : null;
-      };
-      const a = parse(fromInput.value), b = parse(toInput.value);
-      if (!a || !b) { statusEl.textContent = "Set both points first."; statusEl.classList.add("error"); return; }
-
-      statusEl.textContent = "Routing...";
+      const a = parsePt(fromInput.value), b = parsePt(toInput.value);
+      if (!a || !b) return setStatus("Set both points first.", true);
+      setStatus("Routing…");
       try {
         const res = await fetch("/route", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            points: [a, b],
-            profile: document.getElementById("profile").value,
-            points_encoded: false,
-          }),
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ points: [a, b], profile: profileVal(), points_encoded: false }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+        const path = (await res.json()).paths?.[0];
+        if (!path) throw new Error("no path");
+        setOverlay("route", { type: "Feature", geometry: path.points }, [
+          { id: "route", type: "line", paint: { "line-color": "#d33", "line-width": 4 } },
+        ]);
+        setStatus(`${(path.distance / 1000).toFixed(2)} km, ${(path.time / 60000).toFixed(1)} min`);
+        if (path.bbox) map.fitBounds([[path.bbox[0], path.bbox[1]], [path.bbox[2], path.bbox[3]]], { padding: 60 });
+      } catch (err) { setStatus(err.message, true); }
+    };
+
+    // ── 2. Isochrone ─────────────────────────────────────────────
+    document.getElementById("iso-btn").onclick = async () => {
+      const a = parsePt(fromInput.value);
+      if (!a) return setStatus("Set From first.", true);
+      const minutes = parseFloat(document.getElementById("minutes").value);
+      if (!minutes || minutes <= 0) return setStatus("Enter minutes.", true);
+      setStatus("Computing isochrone…");
+      try {
+        const res = await fetch("/route/isochrone", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lat: a[0], lon: a[1], profile: profileVal(), time_limit: Math.round(minutes * 60), buckets: 1 }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
         const data = await res.json();
-        const path = data.paths && data.paths[0];
-        if (!path) throw new Error("no path in response");
-
-        const geo = { type: "Feature", geometry: path.points };
-        if (map.getSource("route")) {
-          map.getSource("route").setData(geo);
-        } else {
-          map.addSource("route", { type: "geojson", data: geo });
-          map.addLayer({
-            id: "route", type: "line", source: "route",
-            paint: { "line-color": "#d33", "line-width": 4 },
-          });
-        }
-
-        const km = (path.distance / 1000).toFixed(2);
-        const min = (path.time / 60000).toFixed(1);
-        statusEl.textContent = `${km} km, ${min} min`;
-
-        const bbox = path.bbox;
-        if (bbox) map.fitBounds([[bbox[0], bbox[1]], [bbox[2], bbox[3]]], { padding: 60 });
-      } catch (err) {
-        statusEl.textContent = err.message;
-        statusEl.classList.add("error");
-      }
+        const polys = data.polygons || [];
+        if (!polys.length) throw new Error("no polygons returned");
+        setOverlay("iso", { type: "FeatureCollection", features: polys }, [
+          { id: "iso-fill",    type: "fill", paint: { "fill-color": "#22a", "fill-opacity": 0.2 } },
+          { id: "iso-outline", type: "line", paint: { "line-color": "#22a", "line-width": 2 } },
+        ]);
+        setStatus(`${minutes} min reachable area`);
+      } catch (err) { setStatus(err.message, true); }
     };
+
+    // ── 3. Overpass ──────────────────────────────────────────────
+    document.getElementById("ovp-btn").onclick = async () => {
+      let ql = document.getElementById("ql").value.trim();
+      if (!ql) return setStatus("Enter an Overpass QL query.", true);
+      // Substitute {{bbox}} with the current map view (Overpass order: south,west,north,east)
+      const b = map.getBounds();
+      ql = ql.replaceAll("{{bbox}}", `${b.getSouth()},${b.getWest()},${b.getNorth()},${b.getEast()}`);
+      setStatus("Querying Overpass…");
+      try {
+        const res = await fetch("/overpass/query", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: ql, output: "json" }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+        const data = await res.json();
+        const fc = elementsToFeatureCollection(data.elements || []);
+        setOverlay("ovp", fc, [
+          { id: "ovp-lines",  type: "line",   filter: ["==", ["geometry-type"], "LineString"],
+            paint: { "line-color": "#093", "line-width": 2 } },
+          { id: "ovp-points", type: "circle", filter: ["==", ["geometry-type"], "Point"],
+            paint: { "circle-radius": 5, "circle-color": "#093", "circle-stroke-color": "#fff", "circle-stroke-width": 1 } },
+        ]);
+        setStatus(`${fc.features.length} feature${fc.features.length === 1 ? "" : "s"}`);
+      } catch (err) { setStatus(err.message, true); }
+    };
+
+    // Minimal Overpass→GeoJSON: nodes → Point; ways/relations with `out geom;` → LineString.
+    function elementsToFeatureCollection(elements) {
+      const features = [];
+      for (const el of elements) {
+        if (el.type === "node" && el.lat != null && el.lon != null) {
+          features.push({ type: "Feature", properties: el.tags || {},
+            geometry: { type: "Point", coordinates: [el.lon, el.lat] } });
+        } else if (el.geometry && Array.isArray(el.geometry)) {
+          features.push({ type: "Feature", properties: el.tags || {},
+            geometry: { type: "LineString", coordinates: el.geometry.map(g => [g.lon, g.lat]) } });
+        }
+      }
+      return { type: "FeatureCollection", features };
+    }
+
+    function profileVal() { return document.getElementById("profile").value; }
   </script>
 </body>
 </html>
