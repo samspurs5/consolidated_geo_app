@@ -1,7 +1,7 @@
 graphhopper:
   # Source of truth – same PBF shared with Overpass
   datareader.file: /data/osm/region.pbf
-  graph.location: /data/graphhopper
+  graph.location: /data/default-gh
 
   # Vehicle profiles to pre-build CH (Contraction Hierarchies) for
   profiles:

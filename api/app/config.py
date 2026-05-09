@@ -16,7 +16,8 @@ class Settings(BaseSettings):
     overpass_container: str = "overpass"
     graphhopper_container: str = "graphhopper"
     overpass_db_volume: str = "consolidated_geo_app_overpass-db"
-    graphhopper_cache_volume: str = "consolidated_geo_app_graphhopper-cache"
+    # Bind-mount path for GraphHopper graph cache (inside the container)
+    graphhopper_cache_dir: str = "/data/default-gh"
 
     class Config:
         env_file = ".env"

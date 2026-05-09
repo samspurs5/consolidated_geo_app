@@ -1,3 +1,7 @@
+# GraphHopper graph cache (large binary files – never commit)
+data/default-gh/*
+!data/default-gh/.gitkeep
+
 # OSM data (can be large – never commit)
 data/osm/*.pbf
 data/osm/*.osm

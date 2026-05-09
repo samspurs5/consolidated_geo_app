@@ -36,16 +36,16 @@ services:
       retries: 10
       start_period: 300s               # large region init can take minutes
 
-  # ── GraphHopper ───────────────────────────────────────────────
+  # ── GraphHopper (Israel Hiking Maps build) ───────────────────
   graphhopper:
-    image: graphhopper/graphhopper:latest
+    image: israelhiking/graphhopper:latest
     container_name: graphhopper
     restart: unless-stopped
     environment:
       JAVA_OPTS: "${GH_JAVA_OPTS:--Xmx2g -Xms512m -XX:+UseG1GC}"
     volumes:
-      - osm-data:/data/osm:ro                      # read PBF
-      - graphhopper-cache:/data/graphhopper        # pre-built graph cache
+      - osm-data:/data/osm:ro                        # read PBF
+      - ./data/default-gh:/data/default-gh           # pre-built graph cache (bind-mount)
       - ./graphhopper/config.yml:/graphhopper/config.yml:ro
     networks:
       - geo-net
@@ -74,7 +74,7 @@ services:
       OVERPASS_CONTAINER: "overpass"
       GRAPHHOPPER_CONTAINER: "graphhopper"
       OVERPASS_DB_VOLUME: "consolidated_geo_app_overpass-db"
-      GRAPHHOPPER_CACHE_VOLUME: "consolidated_geo_app_graphhopper-cache"
+      GRAPHHOPPER_CACHE_DIR: "/data/default-gh"
     volumes:
       - osm-data:/data/osm              # read + write (delta application)
       - /var/run/docker.sock:/var/run/docker.sock   # restart sibling containers
@@ -95,9 +95,8 @@ volumes:
       o: bind
       device: ${PWD}/data/osm
 
-  # Named volumes – managed by Docker; persist across restarts
+  # Named volume – managed by Docker; persist across restarts
   overpass-db:
-  graphhopper-cache:
 
 networks:
   geo-net:

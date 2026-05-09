@@ -193,13 +193,25 @@ async def fetch_and_apply_replication_diffs() -> dict:
 
 
 async def reload_graphhopper() -> dict:
-    """Restart the GraphHopper container so it rebuilds the graph from the updated PBF."""
+    """
+    Clear the graph cache and restart GraphHopper so it fully reimports the
+    updated PBF.  The cache lives in the bind-mount at graphhopper_cache_dir
+    (/data/default-gh); we wipe it via Docker exec before restarting so
+    GraphHopper never skips the import due to a stale cached graph.
+    """
     try:
         dc = _docker_client()
         container = dc.containers.get(settings.graphhopper_container)
+
+        # Clear the graph cache inside the container
+        cache = settings.graphhopper_cache_dir
+        log.info("Clearing GraphHopper cache at %s in container %s", cache, container.name)
+        result = container.exec_run(f"sh -c 'rm -rf {cache}/* {cache}/.*  2>/dev/null; true'")
+        log.debug("Cache clear exit code: %s", result.exit_code)
+
         log.info("Restarting GraphHopper container: %s", container.name)
         container.restart(timeout=10)
-        return {"restarted": settings.graphhopper_container}
+        return {"restarted": settings.graphhopper_container, "cache_cleared": cache}
     except docker.errors.NotFound:
         raise RuntimeError(f"Container not found: {settings.graphhopper_container}")
 
