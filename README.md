@@ -171,7 +171,9 @@ curl -s -G --data-urlencode \
 ├── api/                        # FastAPI: routing + overpass + delta orchestration
 └── scripts/
     ├── download-extract.sh     # Fetch a Geofabrik PBF + state.txt
-    └── apply-local-delta.sh    # Apply .osc files via host osmium
+    ├── apply-local-delta.sh    # Apply .osc files via host osmium
+    ├── save-images.sh          # Bundle images for air-gapped transfer
+    └── load-images.sh          # Restore images on the air-gapped host
 ```
 
 ---
@@ -201,14 +203,45 @@ together — see `docker-compose.yml` for inline comments.
 
 ## Air-gapped operation
 
-Once `data/osm/region.pbf` is in place, nothing in this stack reaches the
-internet:
+Once the container images are present and `data/osm/region.pbf` is in place,
+nothing in this stack reaches the internet:
 
 - GraphHopper elevation downloads are disabled in `graphhopper/config.yml`.
 - Overpass diff fetching is disabled (`OVERPASS_DIFF_URL=""`).
-- Delta updates are applied from local `.osc` files only.
+- Delta updates are applied from local `.osc` files only via the bundled
+  `osmium` (no host install required — see Option B above).
 
-To get fresh `.osc` files into an air-gapped environment, mirror them from a
+### First install on an air-gapped host
+
+The OSM data path is fully offline, but the **container images** still need to
+come from somewhere. Build/pull them once on a connected machine, ship the
+tarball, then load on the target.
+
+```bash
+# === On a connected machine ===
+docker compose pull            # overpass + graphhopper from Docker Hub
+docker compose build api       # api image (apt + pip install run here)
+./scripts/save-images.sh       # → geo-stack-images.tar.gz (~1 GB)
+
+# Optional: bundle a fresh PBF too
+./scripts/download-extract.sh https://download.geofabrik.de/europe/monaco-latest.osm.pbf
+
+# === Transfer to the air-gapped host ===
+# - this repository
+# - geo-stack-images.tar.gz
+# - data/osm/region.pbf
+
+# === On the air-gapped host ===
+./scripts/load-images.sh       # docker load < geo-stack-images.tar.gz
+docker compose up -d           # no network calls, no pulls, no builds
+```
+
+After that, every subsequent boot, every routing query, every Overpass query,
+and every `.osc` delta application is fully offline.
+
+### Keeping data fresh
+
+To get newer `.osc` files into an air-gapped environment, mirror them from a
 Geofabrik update directory (e.g. `monaco-updates/000/...`) onto removable media
 or a local HTTP server, and drop them into `data/osm/updates/` before running
 `apply-local-delta.sh`.
