@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     # Bind-mount path for GraphHopper graph cache (inside the container)
     graphhopper_cache_dir: str = "/data/default-gh"
 
+    # LLM (Ollama)
+    ollama_url: str = "http://ollama:11434"
+    ollama_model: str = "qwen2.5:7b"
+
     class Config:
         env_file = ".env"
 
