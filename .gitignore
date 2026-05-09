@@ -1,10 +1,12 @@
 # OSM data (can be large – never commit)
 data/osm/*.pbf
+data/osm/*.osm
 data/osm/*.osc
 data/osm/*.osc.gz
 data/osm/updates/
 data/osm/state.txt
 data/osm/*.lock
+data/osm/*.tmp
 
 # Python
 __pycache__/
