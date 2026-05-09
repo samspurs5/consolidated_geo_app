@@ -12,6 +12,7 @@
       position: absolute; top: 12px; left: 12px; z-index: 1;
       background: white; padding: 12px 14px; border-radius: 6px;
       box-shadow: 0 2px 8px rgba(0,0,0,0.15); width: 300px;
+      max-height: calc(100vh - 24px); overflow-y: auto;
     }
     #panel h1 { font-size: 14px; margin: 0 0 8px 0; }
     #panel label { display: block; font-size: 12px; color: #555; margin-top: 6px; }
@@ -31,6 +32,15 @@
     #status { margin-top: 8px; font-size: 12px; color: #444; min-height: 1em; }
     #status.error { color: #c00; }
     .hint { font-size: 11px; color: #888; margin-top: 4px; }
+    .sep { margin: 12px -14px 6px -14px; border: 0; border-top: 1px solid #eee; }
+    #chat-log {
+      height: 160px; overflow-y: auto; border: 1px solid #ddd;
+      padding: 6px; background: #fafafa; font-size: 12px; border-radius: 4px;
+    }
+    #chat-log .msg { margin: 3px 0; line-height: 1.35; }
+    #chat-log .you { color: #225; }
+    #chat-log .bot { color: #052; }
+    #chat-log .err { color: #c00; }
   </style>
 </head>
 <body>
@@ -69,6 +79,14 @@
 
     <div id="status"></div>
     <div class="hint">Click map to set From, click again for To.</div>
+
+    <hr class="sep" />
+    <label>Chat <small style="color:#888">(local LLM via Ollama)</small></label>
+    <div id="chat-log"></div>
+    <div class="row" style="margin-top: 6px;">
+      <input id="chat-input" placeholder="ask about routes, places, areas…" style="flex: 3;" />
+      <button id="chat-send" style="flex: 1;">Send</button>
+    </div>
   </div>
   <div id="map"></div>
 
@@ -132,6 +150,23 @@
       for (const def of layerDefs) map.addLayer({ ...def, source: OVERLAYS[key].source });
     };
 
+    const LAYER_DEFS = {
+      route: [
+        { id: "route", type: "line", paint: { "line-color": "#d33", "line-width": 4 } },
+      ],
+      iso: [
+        { id: "iso-fill",    type: "fill", paint: { "fill-color": "#22a", "fill-opacity": 0.2 } },
+        { id: "iso-outline", type: "line", paint: { "line-color": "#22a", "line-width": 2 } },
+      ],
+      ovp: [
+        { id: "ovp-lines",  type: "line",   filter: ["==", ["geometry-type"], "LineString"],
+          paint: { "line-color": "#093", "line-width": 2 } },
+        { id: "ovp-points", type: "circle", filter: ["==", ["geometry-type"], "Point"],
+          paint: { "circle-radius": 5, "circle-color": "#093", "circle-stroke-color": "#fff", "circle-stroke-width": 1 } },
+      ],
+    };
+    const drawOverlay = (kind, geojson) => setOverlay(kind, geojson, LAYER_DEFS[kind]);
+
     document.getElementById("clear-btn").onclick = () => {
       fromLngLat = toLngLat = null;
       fromInput.value = toInput.value = "";
@@ -154,9 +189,7 @@
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
         const path = (await res.json()).paths?.[0];
         if (!path) throw new Error("no path");
-        setOverlay("route", { type: "Feature", geometry: path.points }, [
-          { id: "route", type: "line", paint: { "line-color": "#d33", "line-width": 4 } },
-        ]);
+        drawOverlay("route", { type: "Feature", geometry: path.points });
         setStatus(`${(path.distance / 1000).toFixed(2)} km, ${(path.time / 60000).toFixed(1)} min`);
         if (path.bbox) map.fitBounds([[path.bbox[0], path.bbox[1]], [path.bbox[2], path.bbox[3]]], { padding: 60 });
       } catch (err) { setStatus(err.message, true); }
@@ -178,10 +211,7 @@
         const data = await res.json();
         const polys = data.polygons || [];
         if (!polys.length) throw new Error("no polygons returned");
-        setOverlay("iso", { type: "FeatureCollection", features: polys }, [
-          { id: "iso-fill",    type: "fill", paint: { "fill-color": "#22a", "fill-opacity": 0.2 } },
-          { id: "iso-outline", type: "line", paint: { "line-color": "#22a", "line-width": 2 } },
-        ]);
+        drawOverlay("iso", { type: "FeatureCollection", features: polys });
         setStatus(`${minutes} min reachable area`);
       } catch (err) { setStatus(err.message, true); }
     };
@@ -202,12 +232,7 @@
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
         const data = await res.json();
         const fc = elementsToFeatureCollection(data.elements || []);
-        setOverlay("ovp", fc, [
-          { id: "ovp-lines",  type: "line",   filter: ["==", ["geometry-type"], "LineString"],
-            paint: { "line-color": "#093", "line-width": 2 } },
-          { id: "ovp-points", type: "circle", filter: ["==", ["geometry-type"], "Point"],
-            paint: { "circle-radius": 5, "circle-color": "#093", "circle-stroke-color": "#fff", "circle-stroke-width": 1 } },
-        ]);
+        drawOverlay("ovp", fc);
         setStatus(`${fc.features.length} feature${fc.features.length === 1 ? "" : "s"}`);
       } catch (err) { setStatus(err.message, true); }
     };
@@ -228,6 +253,53 @@
     }
 
     function profileVal() { return document.getElementById("profile").value; }
+
+    // ── 4. Chat ──────────────────────────────────────────────────
+    const chatHistory = [];
+    const chatLog = document.getElementById("chat-log");
+    const chatInput = document.getElementById("chat-input");
+    const escapeHtml = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+    const appendMsg = (cls, label, text) => {
+      const div = document.createElement("div");
+      div.className = `msg ${cls}`;
+      div.innerHTML = `<b>${label}:</b> ${escapeHtml(text)}`;
+      chatLog.appendChild(div);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    };
+
+    async function sendChat() {
+      const text = chatInput.value.trim();
+      if (!text) return;
+      chatInput.value = "";
+      chatHistory.push({ role: "user", content: text });
+      appendMsg("you", "you", text);
+      setStatus("Thinking…");
+      try {
+        const b = map.getBounds();
+        const res = await fetch("/chat", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messages: chatHistory,
+            bbox: [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()],
+          }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+        const data = await res.json();
+        chatHistory.push({ role: "assistant", content: data.reply });
+        appendMsg("bot", "bot", data.reply || "(no reply)");
+        for (const ov of data.overlays || []) {
+          if (LAYER_DEFS[ov.kind]) drawOverlay(ov.kind, ov.geojson);
+        }
+        setStatus("");
+      } catch (err) {
+        appendMsg("err", "err", err.message);
+        setStatus(err.message, true);
+      }
+    }
+    document.getElementById("chat-send").onclick = sendChat;
+    chatInput.addEventListener("keydown", e => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
+    });
   </script>
 </body>
 </html>

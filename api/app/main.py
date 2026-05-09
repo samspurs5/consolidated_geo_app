@@ -7,7 +7,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import settings
-from .routers import data, overpass, route
+from .routers import chat, data, overpass, route
 
 
 @asynccontextmanager
@@ -32,6 +32,23 @@ app = FastAPI(
 app.include_router(route.router, prefix="/route", tags=["routing"])
 app.include_router(overpass.router, prefix="/overpass", tags=["overpass"])
 app.include_router(data.router, prefix="/data", tags=["data"])
+app.include_router(chat.router, prefix="/chat", tags=["chat"])
+
+# Expose routing + overpass tools to external MCP clients (e.g. Claude
+# Desktop) at /mcp. The /chat endpoint above uses Ollama's native
+# tool-calling format internally, so this mount is purely additive.
+try:
+    from fastapi_mcp import FastApiMCP
+
+    _mcp = FastApiMCP(
+        app,
+        name="OSM Geo Tools",
+        description="Routing, isochrone, and Overpass query against a local OSM PBF.",
+        include_tags=["routing", "overpass"],
+    )
+    _mcp.mount()
+except Exception:  # noqa: BLE001  – optional dep, don't crash startup
+    pass
 
 
 @app.get("/health", tags=["meta"])

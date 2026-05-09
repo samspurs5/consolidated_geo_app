@@ -83,6 +83,31 @@ services:
       retries: 10
       start_period: 300s
 
+  # ── Ollama (local LLM for the chat assistant) ────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    environment:
+      # Keep the model loaded in VRAM/RAM indefinitely so chat replies
+      # don't cold-start on every request.
+      OLLAMA_KEEP_ALIVE: "-1"
+    volumes:
+      - ollama-data:/root/.ollama       # persist downloaded models
+    networks:
+      - geo-net
+    # Pull the configured model on first start, then run the server.
+    # Idempotent — `ollama pull` is a no-op if the model is already cached.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        ollama serve &
+        SERVER_PID=$$!
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull "${OLLAMA_MODEL:-gemma3:4b}" || true
+        wait $$SERVER_PID
+
   # ── Unified API ───────────────────────────────────────────────
   api:
     build:
@@ -102,6 +127,8 @@ services:
       GRAPHHOPPER_CONTAINER: "graphhopper"
       OVERPASS_DB_VOLUME: "consolidated_geo_app_overpass-db"
       GRAPHHOPPER_CACHE_DIR: "/data/default-gh"
+      OLLAMA_URL: "http://ollama:11434"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-gemma3:4b}"
     volumes:
       - osm-data:/data/osm              # read + write (delta application)
       - ./data/tiles:/data/tiles:ro     # vector tiles (.pmtiles) for the frontend
@@ -111,6 +138,7 @@ services:
     depends_on:
       - overpass
       - graphhopper
+      - ollama
     networks:
       - geo-net
 
@@ -125,6 +153,9 @@ volumes:
 
   # Named volume – managed by Docker; persist across restarts
   overpass-db:
+
+  # Persists pulled Ollama models between container recreations
+  ollama-data:
 
 networks:
   geo-net:

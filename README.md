@@ -4,7 +4,8 @@ Self-hosted, **offline-first** geo stack:
 
 - **GraphHopper** (routing) — `localhost:8989`
 - **Overpass API** (OSM querying) — `localhost/api/interpreter`
-- **FastAPI** unified backend with delta-update orchestration — `localhost:8000`
+- **Ollama** (local LLM, default `gemma3:4b`) — internal only
+- **FastAPI** unified backend with delta-update orchestration, chat assistant, and an MCP server — `localhost:8000`
 - **MapLibre + pmtiles** static frontend served by the FastAPI service — `localhost:8000/ui/`
 
 Both data services ingest from a single source of truth — `data/osm/region.pbf` —
@@ -103,6 +104,61 @@ The included `style.json` is a no-text minimal style (water, landcover,
 roads, buildings, boundaries) so it works fully offline without any font or
 sprite assets. If you want labels, add a glyph URL pointing at a local font
 mirror.
+
+---
+
+## Chat assistant + MCP
+
+The frontend has a small chat panel at the bottom of the side panel. It
+sends messages to `/chat`, which drives a local Ollama model with
+tool-calling enabled. The model can call three tools backed by the same
+APIs you already have:
+
+| Tool             | Backend                                |
+| ---------------- | -------------------------------------- |
+| `route`          | `gh_svc.route` → GraphHopper           |
+| `isochrone`      | `gh_svc.isochrone` → GraphHopper       |
+| `overpass_query` | `op_svc.query` → Overpass              |
+
+Each tool returns both a textual summary (so the model can talk about it)
+and a GeoJSON overlay (so the frontend draws it on the map). The chat panel
+forwards the current map bbox with every request, so the model can build
+Overpass queries against what the user is actually looking at.
+
+Default model: `gemma3:4b` (~3.3 GB, runs on CPU; tool-calling capable).
+Override via `OLLAMA_MODEL` in `.env`. Any tool-calling-capable Ollama tag
+works (Llama 3.1+, Qwen 2.5+, Mistral, etc.).
+
+```bash
+docker compose up -d                   # ollama starts and pulls the model on first boot
+./scripts/init-ollama.sh               # optional: re-pull / verify
+open http://localhost:8000/ui/         # chat panel is at the bottom of the side panel
+```
+
+The first `docker compose up` will spend a few minutes pulling the model
+into the `ollama-data` named volume; subsequent boots are instant.
+
+### MCP server
+
+The same three tools are exposed as a [Model Context Protocol](https://modelcontextprotocol.io)
+server at `http://localhost:8000/mcp` (SSE). Any MCP-aware client — Claude
+Desktop, the `mcp` CLI, custom agents — can connect and use them
+identically to the chat panel. Wiring is automatic via
+[`fastapi-mcp`](https://github.com/tadata-org/fastapi_mcp); the tools are
+filtered to the `routing` and `overpass` tags only.
+
+Example Claude Desktop config snippet:
+
+```json
+{
+  "mcpServers": {
+    "geo": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:8000/mcp"]
+    }
+  }
+}
+```
 
 ---
 
@@ -218,6 +274,7 @@ curl -s -G --data-urlencode \
     ├── apply-local-delta.sh        # Apply .osc files via host osmium
     ├── build-tiles.sh              # Build .pmtiles from region.pbf via planetiler
     ├── fetch-frontend-vendor.sh    # Download MapLibre + pmtiles JS deps
+    ├── init-ollama.sh              # Pull / refresh the chat LLM
     ├── save-images.sh              # Bundle images for air-gapped transfer
     └── load-images.sh              # Restore images on the air-gapped host
 ```
@@ -265,9 +322,10 @@ tarball, then load on the target.
 
 ```bash
 # === On a connected machine ===
-docker compose pull            # overpass + graphhopper from Docker Hub
+docker compose pull            # overpass + graphhopper + ollama from Docker Hub
 ./scripts/fetch-frontend-vendor.sh  # MapLibre + pmtiles JS into api/app/static/vendor/
 docker compose build api       # bundles vendor JS into the api image
+docker compose up -d ollama    # boot once so the entrypoint pulls the LLM into ollama-data
 ./scripts/save-images.sh       # → geo-stack-images.tar.gz
 
 # Optional: bundle a PBF + pre-built tiles too (so first boot is instant)
@@ -279,6 +337,13 @@ docker compose build api       # bundles vendor JS into the api image
 # - geo-stack-images.tar.gz
 # - data/osm/region.pbf
 # - data/tiles/region.pmtiles  (optional, otherwise rebuild on the host)
+# - the ollama-data volume contents, if you want chat to work offline:
+#     docker run --rm -v consolidated_geo_app_ollama-data:/m -v "$PWD":/o \
+#         alpine tar czf /o/ollama-models.tar.gz -C /m .
+#   then on the target:
+#     docker volume create consolidated_geo_app_ollama-data
+#     docker run --rm -v consolidated_geo_app_ollama-data:/m -v "$PWD":/o \
+#         alpine tar xzf /o/ollama-models.tar.gz -C /m
 
 # === On the air-gapped host ===
 ./scripts/load-images.sh       # docker load < geo-stack-images.tar.gz
