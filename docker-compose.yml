@@ -105,7 +105,7 @@ services:
         ollama serve &
         SERVER_PID=$$!
         until ollama list >/dev/null 2>&1; do sleep 1; done
-        ollama pull "${OLLAMA_MODEL:-gemma3:4b}" || true
+        ollama pull "${OLLAMA_MODEL:-qwen2.5:7b}" || true
         wait $$SERVER_PID
 
   # ── Unified API ───────────────────────────────────────────────
@@ -128,7 +128,7 @@ services:
       OVERPASS_DB_VOLUME: "consolidated_geo_app_overpass-db"
       GRAPHHOPPER_CACHE_DIR: "/data/default-gh"
       OLLAMA_URL: "http://ollama:11434"
-      OLLAMA_MODEL: "${OLLAMA_MODEL:-gemma3:4b}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-qwen2.5:7b}"
     volumes:
       - osm-data:/data/osm              # read + write (delta application)
       - ./data/tiles:/data/tiles:ro     # vector tiles (.pmtiles) for the frontend

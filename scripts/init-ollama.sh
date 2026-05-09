@@ -4,12 +4,12 @@
 # preload additional models or refresh after changing OLLAMA_MODEL.
 #
 # Usage:
-#   ./scripts/init-ollama.sh                # pulls $OLLAMA_MODEL or gemma3:4b
+#   ./scripts/init-ollama.sh                # pulls $OLLAMA_MODEL or qwen2.5:7b
 #   OLLAMA_MODEL=llama3.2:3b ./scripts/init-ollama.sh
 
 set -euo pipefail
 
-MODEL="${OLLAMA_MODEL:-gemma3:4b}"
+MODEL="${OLLAMA_MODEL:-qwen2.5:7b}"
 
 if ! docker compose ps ollama --format '{{.Name}}' | grep -q ollama; then
     echo "ERROR: ollama container is not running. Start it with: docker compose up -d ollama"

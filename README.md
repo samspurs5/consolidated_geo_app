@@ -4,7 +4,7 @@ Self-hosted, **offline-first** geo stack:
 
 - **GraphHopper** (routing) — `localhost:8989`
 - **Overpass API** (OSM querying) — `localhost/api/interpreter`
-- **Ollama** (local LLM, default `gemma3:4b`) — internal only
+- **Ollama** (local LLM, default `qwen2.5:7b`) — internal only
 - **FastAPI** unified backend with delta-update orchestration, chat assistant, and an MCP server — `localhost:8000`
 - **MapLibre + pmtiles** static frontend served by the FastAPI service — `localhost:8000/ui/`
 
@@ -125,9 +125,21 @@ and a GeoJSON overlay (so the frontend draws it on the map). The chat panel
 forwards the current map bbox with every request, so the model can build
 Overpass queries against what the user is actually looking at.
 
-Default model: `gemma3:4b` (~3.3 GB, runs on CPU; tool-calling capable).
-Override via `OLLAMA_MODEL` in `.env`. Any tool-calling-capable Ollama tag
-works (Llama 3.1+, Qwen 2.5+, Mistral, etc.).
+Default model: **`qwen2.5:7b`** (~4.7 GB). Qwen 2.5 leads the Berkeley
+Function Calling Leaderboard at every size class up to 7B and emits clean
+JSON tool arguments with very few hallucinated fields, which matters when
+the LLM is wiring up an Overpass query you'll actually execute. Any
+tool-calling-capable Ollama tag works — common alternatives:
+
+| Model           | Size    | Notes                                  |
+| --------------- | ------- | -------------------------------------- |
+| `qwen2.5:7b`    | ~4.7 GB | **default**, best quality at this size |
+| `qwen2.5:3b`    | ~2 GB   | smallest reliable tool-caller          |
+| `llama3.2:3b`   | ~2 GB   | solid Meta-tuned alternative           |
+| `qwen2.5:14b`   | ~9 GB   | bigger if you have the RAM             |
+
+Override via `OLLAMA_MODEL` in `.env`, then
+`docker compose up -d ollama` to pull the new tag.
 
 ```bash
 docker compose up -d                   # ollama starts and pulls the model on first boot
