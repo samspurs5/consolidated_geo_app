@@ -1,0 +1,27 @@
+graphhopper:
+  # Source of truth – same PBF shared with Overpass
+  datareader.file: /data/osm/region.pbf
+  graph.location: /data/graphhopper
+
+  # Vehicle profiles to pre-build CH (Contraction Hierarchies) for
+  profiles:
+    - name: car
+      vehicle: car
+      weighting: fastest
+    - name: foot
+      vehicle: foot
+      weighting: fastest
+    - name: bike
+      vehicle: bike
+      weighting: fastest
+
+  # Build CH graphs for fast online routing
+  ch.profiles: car,foot,bike
+
+  # Do not restrict import by geography
+  import.osm.ignored.highways: ""
+
+server:
+  application.port: 8989
+  application.host: 0.0.0.0
+  max_threads: 8

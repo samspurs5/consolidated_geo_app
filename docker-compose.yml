@@ -1,0 +1,104 @@
+version: "3.9"
+
+# One source of truth: ./data/osm/region.pbf
+# Both GraphHopper and Overpass initialise from this file.
+# The API service manages delta updates (osmium apply-changes) and
+# coordinates container restarts so both services stay in sync.
+# All services work fully offline once data is loaded.
+
+services:
+
+  # ── Overpass API ──────────────────────────────────────────────
+  overpass:
+    image: wiktorn/overpass-api:latest
+    container_name: overpass
+    restart: unless-stopped
+    environment:
+      # init  → build DB from PBF on first start (file must exist)
+      # rules → load existing DB on subsequent starts
+      OVERPASS_MODE: ${OVERPASS_MODE:-init}
+      OVERPASS_META: ${OVERPASS_META:-yes}
+      OVERPASS_PLANET_URL: "file:///data/osm/region.pbf"
+      # Leave blank to disable automatic network-based diff fetching
+      OVERPASS_DIFF_URL: ${OVERPASS_DIFF_URL:-}
+      OVERPASS_RULES_LOAD: "10"
+      OVERPASS_MAX_TIMEOUT: "1000"
+      OVERPASS_SPACE: ${OVERPASS_SPACE:-4294967296}   # 4 GiB DB space
+    volumes:
+      - osm-data:/data/osm:ro          # read PBF from shared volume
+      - overpass-db:/db                # Overpass internal database
+    networks:
+      - geo-net
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s               # large region init can take minutes
+
+  # ── GraphHopper ───────────────────────────────────────────────
+  graphhopper:
+    image: graphhopper/graphhopper:latest
+    container_name: graphhopper
+    restart: unless-stopped
+    environment:
+      JAVA_OPTS: "${GH_JAVA_OPTS:--Xmx2g -Xms512m -XX:+UseG1GC}"
+    volumes:
+      - osm-data:/data/osm:ro                      # read PBF
+      - graphhopper-cache:/data/graphhopper        # pre-built graph cache
+      - ./graphhopper/config.yml:/graphhopper/config.yml:ro
+    networks:
+      - geo-net
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8989/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
+
+  # ── Unified API ───────────────────────────────────────────────
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: geo-api
+    restart: unless-stopped
+    environment:
+      GRAPHHOPPER_URL: "http://graphhopper:8989"
+      OVERPASS_URL: "http://overpass/api"
+      OSM_DATA_DIR: "/data/osm"
+      OSM_PBF_FILE: "${OSM_PBF_FILE:-region.pbf}"
+      # Replication endpoint – only used if the environment has internet.
+      # Leave empty or point to a local mirror for air-gapped setups.
+      REPLICATION_URL: "${REPLICATION_URL:-https://planet.openstreetmap.org/replication/minute}"
+      OVERPASS_CONTAINER: "overpass"
+      GRAPHHOPPER_CONTAINER: "graphhopper"
+      OVERPASS_DB_VOLUME: "consolidated_geo_app_overpass-db"
+      GRAPHHOPPER_CACHE_VOLUME: "consolidated_geo_app_graphhopper-cache"
+    volumes:
+      - osm-data:/data/osm              # read + write (delta application)
+      - /var/run/docker.sock:/var/run/docker.sock   # restart sibling containers
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      - overpass
+      - graphhopper
+    networks:
+      - geo-net
+
+volumes:
+  # Bind-mount so the operator can drop a .pbf directly into ./data/osm/
+  osm-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/data/osm
+
+  # Named volumes – managed by Docker; persist across restarts
+  overpass-db:
+  graphhopper-cache:
+
+networks:
+  geo-net:
+    driver: bridge
