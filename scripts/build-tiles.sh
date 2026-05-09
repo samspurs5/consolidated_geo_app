@@ -38,7 +38,10 @@ echo "  output: $OUT_FILE"
 echo "  image : $PLANETILER_IMAGE"
 echo "  heap  : $JAVA_OPTS"
 
-docker run --rm \
+# MSYS_NO_PATHCONV=1 stops Git Bash on Windows from rewriting the Unix-style
+# /data/... arguments below into C:/Program Files/Git/data/... before they
+# reach docker. Harmless no-op on Linux/macOS.
+MSYS_NO_PATHCONV=1 docker run --rm \
     -e JAVA_TOOL_OPTIONS="$JAVA_OPTS" \
     -v "$REPO_ROOT/data:/data" \
     "$PLANETILER_IMAGE" \
