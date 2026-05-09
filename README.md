@@ -4,7 +4,7 @@ Self-hosted, **offline-first** geo stack:
 
 - **GraphHopper** (routing) — `localhost:8989`
 - **Overpass API** (OSM querying) — `localhost/api/interpreter`
-- **Ollama** (local LLM, default `qwen2.5:7b`) — internal only
+- **Ollama** (local LLM, default `qwen2.5:3b`) — internal only
 - **FastAPI** unified backend with delta-update orchestration, chat assistant, and an MCP server — `localhost:8000`
 - **MapLibre + pmtiles** static frontend served by the FastAPI service — `localhost:8000/ui/`
 
@@ -125,21 +125,38 @@ and a GeoJSON overlay (so the frontend draws it on the map). The chat panel
 forwards the current map bbox with every request, so the model can build
 Overpass queries against what the user is actually looking at.
 
-Default model: **`qwen2.5:7b`** (~4.7 GB). Qwen 2.5 leads the Berkeley
-Function Calling Leaderboard at every size class up to 7B and emits clean
+Default model: **`qwen2.5:3b`** (~2 GB resident). Qwen 2.5 leads the
+Berkeley Function Calling Leaderboard at every size class and emits clean
 JSON tool arguments with very few hallucinated fields, which matters when
-the LLM is wiring up an Overpass query you'll actually execute. Any
-tool-calling-capable Ollama tag works — common alternatives:
+the LLM is wiring up an Overpass query you'll actually execute. The 3B
+default is sized for a 16 GB laptop running the full stack + browser; bump
+it on bigger boxes:
 
-| Model           | Size    | Notes                                  |
-| --------------- | ------- | -------------------------------------- |
-| `qwen2.5:7b`    | ~4.7 GB | **default**, best quality at this size |
-| `qwen2.5:3b`    | ~2 GB   | smallest reliable tool-caller          |
-| `llama3.2:3b`   | ~2 GB   | solid Meta-tuned alternative           |
-| `qwen2.5:14b`   | ~9 GB   | bigger if you have the RAM             |
+| Model           | Resident | Notes                                       |
+| --------------- | -------- | ------------------------------------------- |
+| `qwen2.5:3b`    | ~2 GB    | **default**, fits comfortably on 16 GB      |
+| `llama3.2:3b`   | ~2 GB    | solid Meta-tuned alternative                |
+| `qwen2.5:7b`    | ~5 GB    | stronger; tight on 16 GB, fine on 32 GB+    |
+| `qwen2.5:14b`   | ~9 GB    | needs a workstation                         |
 
 Override via `OLLAMA_MODEL` in `.env`, then
 `docker compose up -d ollama` to pull the new tag.
+
+Each chat turn shows a trace of the tool calls the model made — the tool
+name, the JSON arguments it passed, and the summary returned to it — so
+you can see exactly what the LLM did before forming its reply.
+
+### Memory budget on a 16 GB laptop
+
+Default settings are tuned to leave 6–8 GB for the OS and your browser:
+
+| Component   | Resident          |
+| ----------- | ----------------- |
+| GraphHopper | ~1.3 GB (`-Xmx1g`) |
+| Overpass    | 0.5–2 GB (region size dependent) |
+| Ollama + qwen2.5:3b | ~2 GB     |
+| FastAPI     | ~150 MB           |
+| Docker overhead | ~500 MB       |
 
 ```bash
 docker compose up -d                   # ollama starts and pulls the model on first boot

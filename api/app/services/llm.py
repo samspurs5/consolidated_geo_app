@@ -18,6 +18,24 @@ from . import overpass as op_svc
 log = logging.getLogger(__name__)
 
 
+def _http_error_msg(e: httpx.HTTPStatusError) -> str:
+    """Pull the most informative line out of a 4xx/5xx response so the LLM
+    can see *why* a tool call failed (and retry sensibly)."""
+    resp = e.response
+    if resp is None:
+        return str(e)
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            for key in ("message", "error", "hints"):
+                if key in body and body[key]:
+                    return f"HTTP {resp.status_code}: {body[key]}"
+    except Exception:  # noqa: BLE001
+        pass
+    text = (resp.text or "").strip()[:500]
+    return f"HTTP {resp.status_code}: {text or '(empty body)'}"
+
+
 TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -163,8 +181,28 @@ async def chat(
         s, w, n, e = bbox
         system += f"\nCurrent map view (use as bbox in Overpass QL): {s:.5f},{w:.5f},{n:.5f},{e:.5f}"
 
+    # Tell the model what region GraphHopper actually has loaded — its bbox
+    # may be much smaller than the user's map view, and routing points
+    # outside it return 400. /info is cheap and cached server-side.
+    try:
+        info = await gh_svc.info(http)
+        gh_bbox = info.get("bbox")
+        if gh_bbox and len(gh_bbox) == 4:
+            mw, ms, me, mn = gh_bbox  # GraphHopper: [minLon, minLat, maxLon, maxLat]
+            system += (
+                f"\nRouting data is limited to: south={ms:.5f}, west={mw:.5f}, "
+                f"north={mn:.5f}, east={me:.5f}. "
+                f"All route/isochrone points must fall strictly inside this box."
+            )
+        profiles = [p.get("name") for p in info.get("profiles", []) if p.get("name")]
+        if profiles:
+            system += f"\nAvailable routing profiles: {', '.join(profiles)}."
+    except Exception:  # noqa: BLE001
+        pass
+
     messages: list[dict] = [{"role": "system", "content": system}, *user_messages]
     overlays: list[dict] = []
+    trace: list[dict] = []
 
     for _ in range(max_iterations):
         resp = await client.chat(model=settings.ollama_model, messages=messages, tools=TOOLS)
@@ -172,7 +210,7 @@ async def chat(
         tool_calls = msg.get("tool_calls") or []
 
         if not tool_calls:
-            return {"reply": msg.get("content", ""), "overlays": overlays}
+            return {"reply": msg.get("content", ""), "overlays": overlays, "trace": trace}
 
         messages.append({"role": "assistant", "content": msg.get("content", ""), "tool_calls": tool_calls})
 
@@ -191,9 +229,16 @@ async def chat(
                 if overlay:
                     overlays.append(overlay)
                 content = json.dumps(summary)
+                trace.append({"name": name, "arguments": args, "result": summary})
+            except httpx.HTTPStatusError as e:
+                err = _http_error_msg(e)
+                log.warning("tool %s failed: %s", name, err)
+                content = json.dumps({"error": err})
+                trace.append({"name": name, "arguments": args, "error": err})
             except Exception as e:  # noqa: BLE001
                 log.exception("tool %s failed", name)
                 content = json.dumps({"error": str(e)})
+                trace.append({"name": name, "arguments": args, "error": str(e)})
             messages.append({"role": "tool", "name": name, "content": content})
 
-    return {"reply": "Stopped after the tool-call iteration limit.", "overlays": overlays}
+    return {"reply": "Stopped after the tool-call iteration limit.", "overlays": overlays, "trace": trace}
