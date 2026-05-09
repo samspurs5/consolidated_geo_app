@@ -1,5 +1,3 @@
-version: "3.9"
-
 # One source of truth: ./data/osm/region.pbf
 # Both GraphHopper and Overpass initialise from this file.
 # The API service manages delta updates (osmium apply-changes) and
@@ -13,12 +11,26 @@ services:
     image: wiktorn/overpass-api:latest
     container_name: overpass
     restart: unless-stopped
+    # The wiktorn image's /db is the overpass user's home dir (mode 0700).
+    # When Docker creates the named volume it inherits that mode, leaving
+    # the dispatcher socket at /db/db/osm3s_osm_base unreachable to the
+    # `nginx` user that fcgiwrap runs as → every query returns
+    # "Permission denied … Unix_Socket". Open up the traversal bit.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - "chmod 0755 /db && exec /app/docker-entrypoint.sh"
     environment:
       # init  → build DB from PBF on first start (file must exist)
       # rules → load existing DB on subsequent starts
       OVERPASS_MODE: ${OVERPASS_MODE:-init}
       OVERPASS_META: ${OVERPASS_META:-yes}
       OVERPASS_PLANET_URL: "file:///data/osm/region.pbf"
+      # The wiktorn/overpass-api entrypoint always copies the URL into
+      # /db/planet.osm.bz2 (by name, not by content). Since our source is
+      # actually a PBF, rename it back and convert to true osm.bz2 with osmium
+      # before update_database runs. osmium-tool is bundled in the image.
+      OVERPASS_PLANET_PREPROCESS: "mv /db/planet.osm.bz2 /db/planet.osm.pbf && osmium cat -o /db/planet.osm.bz2 /db/planet.osm.pbf && rm -f /db/planet.osm.pbf"
       # Leave blank to disable automatic network-based diff fetching
       OVERPASS_DIFF_URL: ${OVERPASS_DIFF_URL:-}
       OVERPASS_RULES_LOAD: "10"
@@ -38,15 +50,30 @@ services:
 
   # ── GraphHopper (Israel Hiking Maps build) ───────────────────
   graphhopper:
-    image: israelhiking/graphhopper:latest
+    image: israelhikingmap/graphhopper:latest
     container_name: graphhopper
     restart: unless-stopped
     environment:
       JAVA_OPTS: "${GH_JAVA_OPTS:--Xmx2g -Xms512m -XX:+UseG1GC}"
+    # The image's default entrypoint hardcodes `-c config-example.yml` and
+    # never sets the input PBF, so GraphHopper would fail with
+    # "cannot use file for DataReader as it wasn't specified".
+    # Override to point at the bundled (v12-compatible) config and our PBF.
+    entrypoint: ["./graphhopper.sh"]
+    command:
+      - "-c"
+      - "/graphhopper/config-example.yml"
+      - "-i"
+      - "/data/osm/region.pbf"
+      - "-o"
+      - "/data/default-gh"
     volumes:
       - osm-data:/data/osm:ro                        # read PBF
       - ./data/default-gh:/data/default-gh           # pre-built graph cache (bind-mount)
-      - ./graphhopper/config.yml:/graphhopper/config.yml:ro
+      # Override the bundled config (which forces SRTM elevation downloads)
+      # with an offline-friendly version. The entrypoint already passes
+      # `-c config-example.yml`, so we shadow the file in place.
+      - ./graphhopper/config.yml:/graphhopper/config-example.yml:ro
     networks:
       - geo-net
     healthcheck:

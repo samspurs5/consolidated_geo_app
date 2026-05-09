@@ -1,27 +1,76 @@
-graphhopper:
-  # Source of truth – same PBF shared with Overpass
-  datareader.file: /data/osm/region.pbf
-  graph.location: /data/default-gh
+# GraphHopper config tuned for offline / air-gapped operation.
+#
+# Mounted into the container at /graphhopper/config-example.yml
+# (overrides the image's bundled config) so the unmodified entrypoint
+# `./graphhopper.sh -c config-example.yml` picks it up.
+#
+# The PBF input and graph cache directory are passed on the command line
+# in docker-compose.yml (`-i /data/osm/region.pbf -o /data/default-gh`).
+#
+# Changes vs. the bundled israelhikingmap config:
+#   * Elevation (SRTM) is DISABLED – the bundled config triggers downloads
+#     from skadi.openstreetmap.de during import, which fails on air-gapped
+#     networks. Re-enable by uncommenting `graph.elevation.provider`.
+#   * `foot_elevation.json` / `bike_elevation.json` are dropped from the
+#     foot/bike profiles for the same reason.
+#   * `average_slope` is dropped from `graph.encoded_values` because it
+#     requires elevation data.
 
-  # Vehicle profiles to pre-build CH (Contraction Hierarchies) for
+graphhopper:
+
+  datareader.file: ""
+  graph.location: graph-cache
+
   profiles:
     - name: car
-      vehicle: car
-      weighting: fastest
+      custom_model_files: [car.json]
     - name: foot
-      vehicle: foot
-      weighting: fastest
+      custom_model_files: [foot.json]
     - name: bike
-      vehicle: bike
-      weighting: fastest
+      custom_model_files: [bike.json]
 
-  # Build CH graphs for fast online routing
-  ch.profiles: car,foot,bike
+  profiles_ch:
+    - profile: car
 
-  # Do not restrict import by geography
-  import.osm.ignored.highways: ""
+  profiles_lm: []
 
+  graph.encoded_values: |
+    car_access, car_average_speed, country, road_class, roundabout, max_speed, road_environment,
+    foot_access, foot_average_speed, foot_priority, foot_road_access, hike_rating,
+    bike_access, bike_average_speed, bike_priority, bike_road_access, bike_network, mtb_rating, ferry_speed
+
+  # graph.elevation.provider: srtm   # uncomment + provide SRTM tiles offline to enable
+
+  prepare.min_network_size: 200
+  prepare.subnetworks.threads: 1
+
+  routing.snap_preventions_default: tunnel, bridge, ferry
+  routing.non_ch.max_waypoint_distance: 1000000
+
+  import.osm.ignored_highways: ''
+
+  graph.dataaccess.default_type: RAM_STORE
+
+
+# ── Dropwizard server ────────────────────────────────────────────────
 server:
-  application.port: 8989
-  application.host: 0.0.0.0
-  max_threads: 8
+  application_connectors:
+    - type: http
+      port: 8989
+      bind_host: 0.0.0.0
+  admin_connectors:
+    - type: http
+      port: 8990
+      bind_host: 0.0.0.0
+
+  request_log:
+    appenders: [{type: console, target: STDOUT, time_zone: UTC}]
+
+logging:
+  appenders:
+    - type: console
+      target: STDOUT
+      time_zone: UTC
+  level: INFO
+  loggers:
+    "com.graphhopper": INFO
