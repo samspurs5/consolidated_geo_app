@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -18,12 +19,33 @@ from . import overpass as op_svc
 log = logging.getLogger(__name__)
 
 
+# Strip a leading [out:...]; settings clause — the proxy already prepends one.
+_OUT_PREFIX_RE = re.compile(r"^\s*\[\s*out\s*:[^\]]+\]\s*;\s*", re.IGNORECASE)
+# Pull the actual error out of Overpass's HTML 400 response.
+_OVERPASS_HTML_ERR_RE = re.compile(r"<strong[^>]*>([^<]+)</strong>\s*:\s*([^<]+)", re.IGNORECASE)
+
+
+def _sanitize_ql(ql: str, bbox: list[float] | None) -> str:
+    """Defensive cleanup of model-emitted Overpass QL:
+    - drop a leading [out:...]; clause (the proxy adds its own)
+    - substitute {{bbox}} with the active map bbox (Overpass order: s,w,n,e)
+    - trim whitespace
+    """
+    s = ql.strip()
+    s = _OUT_PREFIX_RE.sub("", s)
+    if bbox and len(bbox) == 4 and "{{bbox}}" in s:
+        south, west, north, east = bbox
+        s = s.replace("{{bbox}}", f"{south},{west},{north},{east}")
+    return s
+
+
 def _http_error_msg(e: httpx.HTTPStatusError) -> str:
     """Pull the most informative line out of a 4xx/5xx response so the LLM
     can see *why* a tool call failed (and retry sensibly)."""
     resp = e.response
     if resp is None:
         return str(e)
+    # JSON-shaped (GraphHopper)
     try:
         body = resp.json()
         if isinstance(body, dict):
@@ -32,8 +54,13 @@ def _http_error_msg(e: httpx.HTTPStatusError) -> str:
                     return f"HTTP {resp.status_code}: {body[key]}"
     except Exception:  # noqa: BLE001
         pass
-    text = (resp.text or "").strip()[:500]
-    return f"HTTP {resp.status_code}: {text or '(empty body)'}"
+    text = (resp.text or "")
+    # HTML-shaped (Overpass) — extract <strong>Error</strong>: ... fragment(s)
+    matches = _OVERPASS_HTML_ERR_RE.findall(text)
+    if matches:
+        joined = "; ".join(f"{label.strip()}: {detail.strip()}" for label, detail in matches[:3])
+        return f"HTTP {resp.status_code}: {joined}"
+    return f"HTTP {resp.status_code}: {(text.strip() or '(empty body)')[:500]}"
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -93,14 +120,23 @@ TOOLS: list[dict[str, Any]] = [
 
 SYSTEM_PROMPT = (
     "You are a concise geographic assistant for a self-hosted OSM stack.\n"
-    "You have three tools: route, isochrone, overpass_query.\n"
-    "When the user asks about places, use overpass_query with the bounding box of the current map view.\n"
-    "When asked for a route, call route. When asked what's reachable, call isochrone.\n"
-    "Keep replies short — the map renders results visually."
+    "Tools: route, isochrone, overpass_query.\n"
+    "\n"
+    "OVERPASS QL RULES (important, the wrapper rejects malformed queries):\n"
+    "  * Provide ONLY the query body. Do NOT include [out:json]; — the wrapper prepends it.\n"
+    "  * End every statement with a semicolon. End the query with `out body;` (or `out geom;` for ways).\n"
+    "  * Use {{bbox}} as a literal placeholder for the current map view; the wrapper substitutes it.\n"
+    "  * Example — find restaurants in view: `node[amenity=restaurant]({{bbox}});out body;`\n"
+    "  * Example — find roads with names in view: `way[highway][name]({{bbox}});out geom;`\n"
+    "\n"
+    "Use route for A→B routes, isochrone for reachable-area polygons.\n"
+    "Reply briefly — the map renders results visually."
 )
 
 
-async def _dispatch(name: str, args: dict, http: httpx.AsyncClient) -> tuple[dict, dict | None]:
+async def _dispatch(
+    name: str, args: dict, http: httpx.AsyncClient, bbox: list[float] | None = None,
+) -> tuple[dict, dict | None]:
     """Execute a tool. Returns (summary_for_llm, overlay_for_frontend or None)."""
     if name == "route":
         result = await gh_svc.route(
@@ -126,6 +162,7 @@ async def _dispatch(name: str, args: dict, http: httpx.AsyncClient) -> tuple[dic
         return summary, overlay
 
     if name == "overpass_query":
+        args["ql"] = _sanitize_ql(args["ql"], bbox)  # also reflected in the chat trace
         result = await op_svc.query(http, args["ql"])
         elements = result.get("elements", []) if isinstance(result, dict) else []
         summary = {
@@ -225,7 +262,7 @@ async def chat(
                 except json.JSONDecodeError:
                     args = {}
             try:
-                summary, overlay = await _dispatch(name, args, http)
+                summary, overlay = await _dispatch(name, args, http, bbox=bbox)
                 if overlay:
                     overlays.append(overlay)
                 content = json.dumps(summary)
