@@ -165,6 +165,7 @@ async def chat(
 
     messages: list[dict] = [{"role": "system", "content": system}, *user_messages]
     overlays: list[dict] = []
+    trace: list[dict] = []
 
     for _ in range(max_iterations):
         resp = await client.chat(model=settings.ollama_model, messages=messages, tools=TOOLS)
@@ -172,7 +173,7 @@ async def chat(
         tool_calls = msg.get("tool_calls") or []
 
         if not tool_calls:
-            return {"reply": msg.get("content", ""), "overlays": overlays}
+            return {"reply": msg.get("content", ""), "overlays": overlays, "trace": trace}
 
         messages.append({"role": "assistant", "content": msg.get("content", ""), "tool_calls": tool_calls})
 
@@ -191,9 +192,11 @@ async def chat(
                 if overlay:
                     overlays.append(overlay)
                 content = json.dumps(summary)
+                trace.append({"name": name, "arguments": args, "result": summary})
             except Exception as e:  # noqa: BLE001
                 log.exception("tool %s failed", name)
                 content = json.dumps({"error": str(e)})
+                trace.append({"name": name, "arguments": args, "error": str(e)})
             messages.append({"role": "tool", "name": name, "content": content})
 
-    return {"reply": "Stopped after the tool-call iteration limit.", "overlays": overlays}
+    return {"reply": "Stopped after the tool-call iteration limit.", "overlays": overlays, "trace": trace}

@@ -54,7 +54,7 @@ services:
     container_name: graphhopper
     restart: unless-stopped
     environment:
-      JAVA_OPTS: "${GH_JAVA_OPTS:--Xmx2g -Xms512m -XX:+UseG1GC}"
+      JAVA_OPTS: "${GH_JAVA_OPTS:--Xmx1g -Xms256m -XX:+UseG1GC}"
     # The image's default entrypoint hardcodes `-c config-example.yml` and
     # never sets the input PBF, so GraphHopper would fail with
     # "cannot use file for DataReader as it wasn't specified".
@@ -105,7 +105,7 @@ services:
         ollama serve &
         SERVER_PID=$$!
         until ollama list >/dev/null 2>&1; do sleep 1; done
-        ollama pull "${OLLAMA_MODEL:-qwen2.5:7b}" || true
+        ollama pull "${OLLAMA_MODEL:-qwen2.5:3b}" || true
         wait $$SERVER_PID
 
   # ── Unified API ───────────────────────────────────────────────
@@ -128,7 +128,7 @@ services:
       OVERPASS_DB_VOLUME: "consolidated_geo_app_overpass-db"
       GRAPHHOPPER_CACHE_DIR: "/data/default-gh"
       OLLAMA_URL: "http://ollama:11434"
-      OLLAMA_MODEL: "${OLLAMA_MODEL:-qwen2.5:7b}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-qwen2.5:3b}"
     volumes:
       - osm-data:/data/osm              # read + write (delta application)
       - ./data/tiles:/data/tiles:ro     # vector tiles (.pmtiles) for the frontend
