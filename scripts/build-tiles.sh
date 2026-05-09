@@ -41,12 +41,17 @@ echo "  heap  : $JAVA_OPTS"
 # MSYS_NO_PATHCONV=1 stops Git Bash on Windows from rewriting the Unix-style
 # /data/... arguments below into C:/Program Files/Git/data/... before they
 # reach docker. Harmless no-op on Linux/macOS.
+#
+# --download fetches the three small auxiliary datasets the openmaptiles
+# schema needs (lake_centerlines, water-polygons, natural_earth, ~600 MB
+# total) into data/sources/ on first run. Subsequent runs reuse the cache.
 MSYS_NO_PATHCONV=1 docker run --rm \
     -e JAVA_TOOL_OPTIONS="$JAVA_OPTS" \
     -v "$REPO_ROOT/data:/data" \
     "$PLANETILER_IMAGE" \
     --osm-path=/data/osm/region.pbf \
     --output=/data/tiles/region.pmtiles \
+    --download \
     --force
 
 SIZE=$(du -h "$OUT_FILE" | cut -f1)
