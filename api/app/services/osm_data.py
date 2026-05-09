@@ -26,7 +26,12 @@ import aiofiles
 import docker
 import docker.errors
 import httpx
-import osmium
+
+try:
+    import osmium  # noqa: F401 – used only if pyosmium is installed
+    _OSMIUM_AVAILABLE = True
+except ImportError:
+    _OSMIUM_AVAILABLE = False
 
 from ..config import settings
 
@@ -64,16 +69,19 @@ async def get_status() -> dict:
         "pbf_mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
     }
 
-    # osmium fileinfo -e gives timestamp + replication header
-    code, out, _ = await _run("osmium", "fileinfo", "-e", str(pbf))
-    if code == 0:
-        for line in out.splitlines():
-            if "Timestamp:" in line:
-                info["osm_timestamp"] = line.split(":", 1)[1].strip()
-            if "Replication URL:" in line:
-                info["replication_url"] = line.split(":", 1)[1].strip()
-            if "Sequence number:" in line:
-                info["sequence_number"] = line.split(":", 1)[1].strip()
+    # osmium fileinfo -e gives timestamp + replication header (best-effort)
+    try:
+        code, out, _ = await _run("osmium", "fileinfo", "-e", str(pbf))
+        if code == 0:
+            for line in out.splitlines():
+                if "Timestamp:" in line:
+                    info["osm_timestamp"] = line.split(":", 1)[1].strip()
+                if "Replication URL:" in line:
+                    info["replication_url"] = line.split(":", 1)[1].strip()
+                if "Sequence number:" in line:
+                    info["sequence_number"] = line.split(":", 1)[1].strip()
+    except FileNotFoundError:
+        info["osmium_available"] = False
 
     if settings.state_path.exists():
         info["state_file"] = settings.state_path.read_text()
@@ -133,7 +141,13 @@ async def apply_delta_files(delta_paths: list[Path]) -> dict:
         "--progress",
     ]
     log.info("Running: %s", " ".join(cmd))
-    code, out, err = await _run(*cmd)
+    try:
+        code, out, err = await _run(*cmd)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "osmium-tool is not installed. "
+            "Inside Docker this is available; outside Docker install osmium-tool."
+        )
     if code != 0:
         raise RuntimeError(f"osmium apply-changes failed (exit {code}):\n{err}")
 
@@ -166,7 +180,13 @@ async def fetch_and_apply_replication_diffs() -> dict:
         str(settings.pbf_path),
     ]
     log.info("Running: %s", " ".join(cmd))
-    code, out, err = await _run(*cmd)
+    try:
+        code, out, err = await _run(*cmd)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "pyosmium-up-to-date is not installed. "
+            "Inside Docker this is available via the pyosmium package."
+        )
     if code != 0:
         raise RuntimeError(f"pyosmium-up-to-date failed (exit {code}):\n{err}")
     return {"stdout": out, "stderr": err}
