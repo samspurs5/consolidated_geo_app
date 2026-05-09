@@ -119,6 +119,20 @@ APIs you already have:
 | `route`          | `gh_svc.route` → GraphHopper           |
 | `isochrone`      | `gh_svc.isochrone` → GraphHopper       |
 | `overpass_query` | `op_svc.query` → Overpass              |
+| `nearest_amenity` | Overpass `around:` + haversine sort    |
+| `reachable_pois` | `gh_svc.isochrone` + Overpass bbox     |
+| `tour_planner`   | Overpass + `gh_svc.matrix` + greedy/2-opt + `gh_svc.route` |
+
+Tool selection is the first thing the model decides. The bigger
+tools (`tour_planner`, `reachable_pois`, `nearest_amenity`) exist so
+the small local LLM can answer compound questions in one call instead
+of trying to orchestrate three primitive calls correctly. Examples
+each tool unlocks:
+
+- "Plan a bar crawl that visits at least 5 bars over 1 km" → `tour_planner`
+- "Where's the nearest pharmacy?" → `nearest_amenity`
+- "What restaurants can I walk to in 10 minutes?" → `reachable_pois`
+- "Roads called rue de something near me" → `overpass_query` (custom)
 
 Each tool returns both a textual summary (so the model can talk about it)
 and a GeoJSON overlay (so the frontend draws it on the map). The chat panel
