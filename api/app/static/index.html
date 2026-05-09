@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OSM Geo App</title>
+  <link rel="stylesheet" href="vendor/maplibre-gl.css" />
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map { position: absolute; inset: 0; }
+    #panel {
+      position: absolute; top: 12px; left: 12px; z-index: 1;
+      background: white; padding: 12px 14px; border-radius: 6px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15); width: 280px;
+    }
+    #panel h1 { font-size: 14px; margin: 0 0 8px 0; }
+    #panel label { display: block; font-size: 12px; color: #555; margin-top: 6px; }
+    #panel input, #panel select {
+      width: 100%; box-sizing: border-box; padding: 4px 6px;
+      font-family: monospace; font-size: 12px;
+    }
+    #panel button {
+      margin-top: 10px; padding: 6px 12px; font-size: 13px;
+      cursor: pointer; border: 1px solid #888; background: #f4f4f4; border-radius: 4px;
+    }
+    #panel button:hover { background: #e8e8e8; }
+    #status { margin-top: 8px; font-size: 12px; color: #444; min-height: 1em; }
+    #status.error { color: #c00; }
+    .pin-hint { font-size: 11px; color: #888; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <div id="panel">
+    <h1>Route</h1>
+    <label>From <small style="color:#888">(lat, lng)</small></label>
+    <input id="from" placeholder="click on map" />
+    <label>To</label>
+    <input id="to" placeholder="click on map" />
+    <label>Profile</label>
+    <select id="profile">
+      <option value="car">car</option>
+      <option value="foot">foot</option>
+      <option value="bike">bike</option>
+    </select>
+    <button id="route-btn">Find route</button>
+    <button id="clear-btn">Clear</button>
+    <div id="status"></div>
+    <div class="pin-hint">Tip: click the map to set From, click again for To.</div>
+  </div>
+  <div id="map"></div>
+
+  <script src="vendor/pmtiles.js"></script>
+  <script src="vendor/maplibre-gl.js"></script>
+  <script>
+    const protocol = new pmtiles.Protocol();
+    maplibregl.addProtocol("pmtiles", protocol.tile);
+
+    const map = new maplibregl.Map({
+      container: "map",
+      style: "style.json",
+      center: [7.42, 43.74],
+      zoom: 13,
+    });
+    map.addControl(new maplibregl.NavigationControl());
+
+    let fromLngLat = null, toLngLat = null;
+    let fromMarker = null, toMarker = null;
+    const statusEl = document.getElementById("status");
+    const fromInput = document.getElementById("from");
+    const toInput = document.getElementById("to");
+
+    const fmt = ll => `${ll.lat.toFixed(6)}, ${ll.lng.toFixed(6)}`;
+
+    map.on("click", e => {
+      if (!fromLngLat) {
+        fromLngLat = e.lngLat;
+        fromInput.value = fmt(e.lngLat);
+        fromMarker = new maplibregl.Marker({ color: "#22a" }).setLngLat(e.lngLat).addTo(map);
+      } else if (!toLngLat) {
+        toLngLat = e.lngLat;
+        toInput.value = fmt(e.lngLat);
+        toMarker = new maplibregl.Marker({ color: "#a22" }).setLngLat(e.lngLat).addTo(map);
+      }
+    });
+
+    document.getElementById("clear-btn").onclick = () => {
+      fromLngLat = toLngLat = null;
+      fromInput.value = toInput.value = "";
+      if (fromMarker) { fromMarker.remove(); fromMarker = null; }
+      if (toMarker) { toMarker.remove(); toMarker = null; }
+      if (map.getLayer("route")) map.removeLayer("route");
+      if (map.getSource("route")) map.removeSource("route");
+      statusEl.textContent = "";
+      statusEl.classList.remove("error");
+    };
+
+    document.getElementById("route-btn").onclick = async () => {
+      statusEl.classList.remove("error");
+      const parse = s => {
+        const m = s.match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
+        return m ? [parseFloat(m[1]), parseFloat(m[2])] : null;
+      };
+      const a = parse(fromInput.value), b = parse(toInput.value);
+      if (!a || !b) { statusEl.textContent = "Set both points first."; statusEl.classList.add("error"); return; }
+
+      statusEl.textContent = "Routing...";
+      try {
+        const res = await fetch("/route", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            points: [a, b],
+            profile: document.getElementById("profile").value,
+            points_encoded: false,
+          }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+        const data = await res.json();
+        const path = data.paths && data.paths[0];
+        if (!path) throw new Error("no path in response");
+
+        const geo = { type: "Feature", geometry: path.points };
+        if (map.getSource("route")) {
+          map.getSource("route").setData(geo);
+        } else {
+          map.addSource("route", { type: "geojson", data: geo });
+          map.addLayer({
+            id: "route", type: "line", source: "route",
+            paint: { "line-color": "#d33", "line-width": 4 },
+          });
+        }
+
+        const km = (path.distance / 1000).toFixed(2);
+        const min = (path.time / 60000).toFixed(1);
+        statusEl.textContent = `${km} km, ${min} min`;
+
+        const bbox = path.bbox;
+        if (bbox) map.fitBounds([[bbox[0], bbox[1]], [bbox[2], bbox[3]]], { padding: 60 });
+      } catch (err) {
+        statusEl.textContent = err.message;
+        statusEl.classList.add("error");
+      }
+    };
+  </script>
+</body>
+</html>

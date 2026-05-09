@@ -12,6 +12,19 @@ data/osm/state.txt
 data/osm/*.lock
 data/osm/*.tmp
 
+# Vector tiles produced by scripts/build-tiles.sh
+data/tiles/*.pmtiles
+data/tiles/*.mbtiles
+!data/tiles/.gitkeep
+
+# Frontend JS vendored by scripts/fetch-frontend-vendor.sh
+api/app/static/vendor/*.js
+api/app/static/vendor/*.css
+!api/app/static/vendor/.gitkeep
+
+# Air-gap image bundle
+geo-stack-images.tar.gz
+
 # Python
 __pycache__/
 *.pyc
