@@ -4,6 +4,7 @@ JSON-schema convention so the same tools can be exposed externally via
 fastapi-mcp at /mcp."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -71,6 +72,12 @@ class _TourPlannerArgs(BaseModel):
     max_stops:      int     = Field(8, ge=2, le=30)
 
 
+class _AmenityPairsArgs(BaseModel):
+    amenity_a:      str   = Field(..., min_length=1)
+    amenity_b:      str   = Field(..., min_length=1)
+    max_distance_m: float = Field(100, gt=0, le=5000)
+
+
 _ARG_MODELS: dict[str, type[BaseModel]] = {
     "route":           _RouteArgs,
     "isochrone":       _IsochroneArgs,
@@ -78,6 +85,7 @@ _ARG_MODELS: dict[str, type[BaseModel]] = {
     "nearest_amenity": _NearestAmenityArgs,
     "reachable_pois":  _ReachablePoisArgs,
     "tour_planner":    _TourPlannerArgs,
+    "amenity_pairs":   _AmenityPairsArgs,
 }
 
 
@@ -305,6 +313,27 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "amenity_pairs",
+            "description": (
+                "Find pairs of amenities within a maximum distance of each other in the current map view. "
+                "Returns the primary (amenity_a) places that have at least one secondary (amenity_b) "
+                "place nearby. Use for 'pubs with a cafe within 50m', 'restaurants near hotels', "
+                "'ATMs near banks'. Requires the chat map view to be set."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "amenity_a":      {"type": "string", "description": "primary amenity tag (the result list)"},
+                    "amenity_b":      {"type": "string", "description": "secondary amenity to look for nearby"},
+                    "max_distance_m": {"type": "number", "description": "max distance in metres, default 100"},
+                },
+                "required": ["amenity_a", "amenity_b"],
+            },
+        },
+    },
 ]
 
 
@@ -317,6 +346,7 @@ SYSTEM_PROMPT = (
     "  * 'nearest X to a point' → nearest_amenity\n"
     "  * 'X reachable in N minutes from a point' → reachable_pois\n"
     "  * 'plan a tour / crawl / hop through many X' → tour_planner\n"
+    "  * 'X with a Y within Nm' / 'X near Y' → amenity_pairs (NEVER write Overpass set arithmetic)\n"
     "  * Anything else (custom tag combinations, ways, relations) → overpass_query\n"
     "\n"
     "OVERPASS QL RULES (the wrapper rejects malformed queries):\n"
@@ -337,6 +367,8 @@ SYSTEM_PROMPT = (
     "    → reachable_pois({\"lat\": 43.74, \"lon\": 7.42, \"minutes\": 10, \"amenity\": \"cafe\", \"profile\": \"foot\"})\n"
     "  User: \"plan a bar crawl over at least 1 km\"\n"
     "    → tour_planner({\"amenity\": \"bar\", \"min_distance_m\": 1000, \"profile\": \"foot\"})\n"
+    "  User: \"pubs with a cafe within 50 metres\"\n"
+    "    → amenity_pairs({\"amenity_a\": \"pub\", \"amenity_b\": \"cafe\", \"max_distance_m\": 50})\n"
     "  User: \"show all parks in view\"\n"
     "    → overpass_query({\"ql\": \"way[leisure=park]({{bbox}});out geom;\"})\n"
     "\n"
@@ -549,6 +581,76 @@ async def _dispatch(
                 "geometry": {"type": "Point", "coordinates": [s["lon"], s["lat"]]},
             })
         overlay = {"kind": "tour", "geojson": {"type": "FeatureCollection", "features": features}}
+        return summary, overlay
+
+    if name == "amenity_pairs":
+        if not bbox or len(bbox) != 4:
+            return {"error": "amenity_pairs needs the chat map view to be set"}, None
+        amenity_a = args["amenity_a"]
+        amenity_b = args["amenity_b"]
+        max_d = float(args.get("max_distance_m") or 100)
+        south, west, north, east = bbox
+        # Two simple Overpass calls — easier than wrangling Overpass set
+        # arithmetic, and runs in parallel.
+        ql_a = f"node[amenity={amenity_a}]({south},{west},{north},{east});out body;"
+        ql_b = f"node[amenity={amenity_b}]({south},{west},{north},{east});out body;"
+        res_a, res_b = await asyncio.gather(
+            op_svc.query(http, ql_a),
+            op_svc.query(http, ql_b),
+        )
+        a_nodes = [
+            e for e in (res_a.get("elements") or [])
+            if e.get("type") == "node" and e.get("lat") is not None
+        ]
+        b_nodes = [
+            e for e in (res_b.get("elements") or [])
+            if e.get("type") == "node" and e.get("lat") is not None
+        ]
+        matched_a: list[dict] = []
+        matched_b_ids: set = set()
+        pairs: list[dict] = []
+        for a in a_nodes:
+            nearby = []
+            for b in b_nodes:
+                d = _haversine_m(a["lat"], a["lon"], b["lat"], b["lon"])
+                if d <= max_d:
+                    nearby.append({
+                        "id": b["id"],
+                        "name": (b.get("tags") or {}).get("name") or "(unnamed)",
+                        "distance_m": round(d),
+                    })
+                    matched_b_ids.add(b["id"])
+            if nearby:
+                nearby.sort(key=lambda x: x["distance_m"])
+                matched_a.append(a)
+                pairs.append({
+                    "name": (a.get("tags") or {}).get("name") or "(unnamed)",
+                    "lat": a["lat"], "lon": a["lon"],
+                    "nearby_count": len(nearby),
+                    "nearest": nearby[0],
+                })
+        summary = {
+            "amenity_a": amenity_a, "amenity_b": amenity_b,
+            "max_distance_m": max_d,
+            "matched_count": len(matched_a),
+            "candidates_a": len(a_nodes), "candidates_b": len(b_nodes),
+            "sample": pairs[:5],
+        }
+        features: list[dict] = []
+        for a in matched_a:
+            features.append({
+                "type": "Feature",
+                "properties": {**(a.get("tags") or {}), "role": "primary"},
+                "geometry": {"type": "Point", "coordinates": [a["lon"], a["lat"]]},
+            })
+        for b in b_nodes:
+            if b.get("id") in matched_b_ids:
+                features.append({
+                    "type": "Feature",
+                    "properties": {**(b.get("tags") or {}), "role": "secondary"},
+                    "geometry": {"type": "Point", "coordinates": [b["lon"], b["lat"]]},
+                })
+        overlay = {"kind": "ovp", "geojson": {"type": "FeatureCollection", "features": features}}
         return summary, overlay
 
     raise ValueError(f"unknown tool: {name}")
