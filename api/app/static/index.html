@@ -49,6 +49,28 @@
     #chat-log .tool .name { color: #225; font-weight: bold; }
     #chat-log .tool .res { color: #052; }
     #chat-log .tool .err { color: #c00; }
+
+    /* Right-side panel: live POIs in the current viewport */
+    #poi-panel {
+      position: absolute; top: 12px; right: 12px; z-index: 1;
+      background: white; padding: 12px 14px; border-radius: 6px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15); width: 240px;
+      max-height: calc(100vh - 24px); display: flex; flex-direction: column;
+    }
+    #poi-panel h2 { font-size: 13px; margin: 0 0 6px 0; display: flex; justify-content: space-between; }
+    #poi-panel h2 .count { color: #888; font-weight: normal; font-size: 11px; }
+    #poi-status { font-size: 11px; color: #888; min-height: 1em; margin-bottom: 6px; }
+    #poi-list { flex: 1; overflow-y: auto; font-size: 12px; border-top: 1px solid #eee; }
+    .poi-row { padding: 5px 6px; border-bottom: 1px solid #eee; cursor: pointer; }
+    .poi-row:hover { background: #f4f4f8; }
+    .poi-row .name { font-weight: 600; color: #225; }
+    .poi-row .kind { color: #888; font-size: 11px; }
+
+    /* Feature popup styling */
+    .maplibregl-popup-content { padding: 8px 10px; max-width: 320px; }
+    .feature-popup { font-family: monospace; font-size: 11px; line-height: 1.45; }
+    .feature-popup .k { color: #225; font-weight: 600; margin-right: 4px; }
+    .feature-popup .v { color: #333; word-break: break-all; }
   </style>
 </head>
 <body>
@@ -96,6 +118,13 @@
       <button id="chat-send" style="flex: 1;">Send</button>
     </div>
   </div>
+
+  <div id="poi-panel">
+    <h2>Points in view <span class="count" id="poi-count"></span></h2>
+    <div id="poi-status">Pan or zoom to load POIs</div>
+    <div id="poi-list"></div>
+  </div>
+
   <div id="map"></div>
 
   <script src="vendor/pmtiles.js"></script>
@@ -110,7 +139,7 @@
       center: [7.42, 43.74],
       zoom: 13,
     });
-    map.addControl(new maplibregl.NavigationControl());
+    map.addControl(new maplibregl.NavigationControl(), "bottom-right");
 
     let fromLngLat = null, toLngLat = null;
     let fromMarker = null, toMarker = null;
@@ -128,7 +157,38 @@
       statusEl.classList.toggle("error", !!isError);
     };
 
+    // Layers we expose for click-to-popup. Even if they don't exist yet
+    // (overlays are added on demand), MapLibre handles the binding lazily.
+    const INTERACTIVE_LAYERS = [
+      "ovp-points", "ovp-lines", "tour-stops", "tour-line", "route",
+      "iso-fill", "iso-outline",
+    ];
+
+    const escapeHtml = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+    function showFeaturePopup(lngLat, props) {
+      const entries = Object.entries(props || {}).filter(([, v]) => v !== null && v !== "");
+      const html = entries.length
+        ? entries.map(([k, v]) => `<div><span class="k">${escapeHtml(k)}</span><span class="v">${escapeHtml(v)}</span></div>`).join("")
+        : "<i>(no tags)</i>";
+      new maplibregl.Popup({ maxWidth: "320px", closeButton: true })
+        .setLngLat(lngLat)
+        .setHTML(`<div class="feature-popup">${html}</div>`)
+        .addTo(map);
+    }
+    for (const id of INTERACTIVE_LAYERS) {
+      map.on("click", id, e => {
+        if (!e.features?.length) return;
+        showFeaturePopup(e.lngLat, e.features[0].properties);
+      });
+      map.on("mouseenter", id, () => { map.getCanvas().style.cursor = "pointer"; });
+      map.on("mouseleave", id, () => { map.getCanvas().style.cursor = ""; });
+    }
+
     map.on("click", e => {
+      // Skip from/to setting when the user clicks an existing feature —
+      // the per-layer click handler above will pop the tags instead.
+      const hits = map.queryRenderedFeatures(e.point, { layers: INTERACTIVE_LAYERS });
+      if (hits.length) return;
       if (!fromLngLat) {
         fromLngLat = e.lngLat;
         fromInput.value = fmt(e.lngLat);
@@ -273,7 +333,6 @@
     const chatHistory = [];
     const chatLog = document.getElementById("chat-log");
     const chatInput = document.getElementById("chat-input");
-    const escapeHtml = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
     const appendMsg = (cls, label, text) => {
       const div = document.createElement("div");
       div.className = `msg ${cls}`;
@@ -329,6 +388,78 @@
     chatInput.addEventListener("keydown", e => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
     });
+
+    // ── 5. Live POI panel ────────────────────────────────────────
+    // Re-queries Overpass on every viewport change (debounced) and lists
+    // named amenity/shop/tourism nodes in view. Click a row to fly to it.
+    const poiList = document.getElementById("poi-list");
+    const poiCount = document.getElementById("poi-count");
+    const poiStatus = document.getElementById("poi-status");
+    const POI_MIN_ZOOM = 13;
+    let poiTimer = null;
+    let poiSeq = 0;
+
+    function debouncedRefreshPois() {
+      clearTimeout(poiTimer);
+      poiTimer = setTimeout(refreshPois, 500);
+    }
+
+    async function refreshPois() {
+      const z = map.getZoom();
+      if (z < POI_MIN_ZOOM) {
+        poiList.innerHTML = "";
+        poiCount.textContent = "";
+        poiStatus.textContent = `Zoom in to load POIs (current ${z.toFixed(1)}, need ≥ ${POI_MIN_ZOOM})`;
+        return;
+      }
+      const seq = ++poiSeq;
+      const b = map.getBounds();
+      const bbox = `${b.getSouth()},${b.getWest()},${b.getNorth()},${b.getEast()}`;
+      const ql =
+        `(node[name][amenity](${bbox});` +
+        `node[name][shop](${bbox});` +
+        `node[name][tourism](${bbox}););out body 60;`;
+      poiStatus.textContent = "Loading…";
+      try {
+        const res = await fetch("/overpass/query", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: ql, output: "json" }),
+        });
+        if (seq !== poiSeq) return;  // a newer request superseded us
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderPoiList(data.elements || []);
+      } catch (err) {
+        if (seq !== poiSeq) return;
+        poiStatus.textContent = `Error: ${err.message}`;
+        poiList.innerHTML = "";
+        poiCount.textContent = "";
+      }
+    }
+
+    function renderPoiList(elements) {
+      const named = elements.filter(e => e.tags?.name).sort(
+        (a, b) => a.tags.name.localeCompare(b.tags.name)
+      );
+      poiCount.textContent = named.length === 60 ? "60+" : String(named.length);
+      poiStatus.textContent = named.length ? "" : "No named POIs in view";
+      poiList.innerHTML = "";
+      for (const el of named) {
+        const t = el.tags;
+        const kind = t.amenity || t.shop || t.tourism || "";
+        const row = document.createElement("div");
+        row.className = "poi-row";
+        row.innerHTML = `<div class="name">${escapeHtml(t.name)}</div><div class="kind">${escapeHtml(kind)}</div>`;
+        row.onclick = () => {
+          map.flyTo({ center: [el.lon, el.lat], zoom: Math.max(map.getZoom(), 17) });
+          showFeaturePopup({ lng: el.lon, lat: el.lat }, t);
+        };
+        poiList.appendChild(row);
+      }
+    }
+
+    map.on("moveend", debouncedRefreshPois);
+    map.on("load", debouncedRefreshPois);
   </script>
 </body>
 </html>
