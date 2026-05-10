@@ -240,7 +240,18 @@
           paint: { "circle-radius": 7, "circle-color": "#a05", "circle-stroke-color": "#fff", "circle-stroke-width": 2 } },
       ],
     };
-    const drawOverlay = (kind, geojson) => setOverlay(kind, geojson, LAYER_DEFS[kind]);
+    // The "ovp" overlay holds whatever the user's last Overpass-y call
+    // returned (manual button, /chat overpass_query / nearest_amenity /
+    // amenity_pairs). The right-hand POI panel filters this set by the
+    // current viewport.
+    let lastOvpFeatures = [];
+    const drawOverlay = (kind, geojson) => {
+      setOverlay(kind, geojson, LAYER_DEFS[kind]);
+      if (kind === "ovp") {
+        lastOvpFeatures = (geojson && geojson.features) || [];
+        renderPoiPanel();
+      }
+    };
 
     document.getElementById("clear-btn").onclick = () => {
       fromLngLat = toLngLat = null;
@@ -248,6 +259,8 @@
       if (fromMarker) { fromMarker.remove(); fromMarker = null; }
       if (toMarker) { toMarker.remove(); toMarker = null; }
       for (const k of Object.keys(OVERLAYS)) removeOverlay(k);
+      lastOvpFeatures = [];
+      renderPoiPanel();
       setStatus("");
     };
 
@@ -389,77 +402,57 @@
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
     });
 
-    // ── 5. Live POI panel ────────────────────────────────────────
-    // Re-queries Overpass on every viewport change (debounced) and lists
-    // named amenity/shop/tourism nodes in view. Click a row to fly to it.
+    // ── 5. POI panel — driven by the last Overpass result ─────────
+    // Lists Point features from the current "ovp" overlay (whatever the
+    // user's last Overpass query returned) clipped to the visible bbox.
+    // Re-renders when the viewport moves OR when a new query lands.
     const poiList = document.getElementById("poi-list");
     const poiCount = document.getElementById("poi-count");
     const poiStatus = document.getElementById("poi-status");
-    const POI_MIN_ZOOM = 13;
-    let poiTimer = null;
-    let poiSeq = 0;
 
-    function debouncedRefreshPois() {
-      clearTimeout(poiTimer);
-      poiTimer = setTimeout(refreshPois, 500);
-    }
-
-    async function refreshPois() {
-      const z = map.getZoom();
-      if (z < POI_MIN_ZOOM) {
-        poiList.innerHTML = "";
+    function renderPoiPanel() {
+      poiList.innerHTML = "";
+      if (!lastOvpFeatures.length) {
         poiCount.textContent = "";
-        poiStatus.textContent = `Zoom in to load POIs (current ${z.toFixed(1)}, need ≥ ${POI_MIN_ZOOM})`;
+        poiStatus.textContent = "Run an Overpass query (chat or button) to populate this list";
         return;
       }
-      const seq = ++poiSeq;
       const b = map.getBounds();
-      const bbox = `${b.getSouth()},${b.getWest()},${b.getNorth()},${b.getEast()}`;
-      const ql =
-        `(node[name][amenity](${bbox});` +
-        `node[name][shop](${bbox});` +
-        `node[name][tourism](${bbox}););out body 60;`;
-      poiStatus.textContent = "Loading…";
-      try {
-        const res = await fetch("/overpass/query", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: ql, output: "json" }),
-        });
-        if (seq !== poiSeq) return;  // a newer request superseded us
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        renderPoiList(data.elements || []);
-      } catch (err) {
-        if (seq !== poiSeq) return;
-        poiStatus.textContent = `Error: ${err.message}`;
-        poiList.innerHTML = "";
-        poiCount.textContent = "";
+      const south = b.getSouth(), west = b.getWest(), north = b.getNorth(), east = b.getEast();
+      const visible = [];
+      for (const f of lastOvpFeatures) {
+        if (f?.geometry?.type !== "Point") continue;  // skip lines for the row list
+        const [lon, lat] = f.geometry.coordinates;
+        if (lat < south || lat > north || lon < west || lon > east) continue;
+        visible.push(f);
       }
-    }
-
-    function renderPoiList(elements) {
-      const named = elements.filter(e => e.tags?.name).sort(
-        (a, b) => a.tags.name.localeCompare(b.tags.name)
-      );
-      poiCount.textContent = named.length === 60 ? "60+" : String(named.length);
-      poiStatus.textContent = named.length ? "" : "No named POIs in view";
-      poiList.innerHTML = "";
-      for (const el of named) {
-        const t = el.tags;
-        const kind = t.amenity || t.shop || t.tourism || "";
+      visible.sort((a, b) => {
+        const an = a.properties?.name || "";
+        const bn = b.properties?.name || "";
+        return an.localeCompare(bn);
+      });
+      poiCount.textContent = `${visible.length} / ${lastOvpFeatures.length}`;
+      poiStatus.textContent = visible.length
+        ? ""
+        : "No matched points in the current viewport — pan to a result, or zoom out";
+      for (const f of visible) {
+        const p = f.properties || {};
+        const [lon, lat] = f.geometry.coordinates;
+        const name = p.name || "(unnamed)";
+        const kind = p.amenity || p.shop || p.tourism || p.role || p.leisure || "";
         const row = document.createElement("div");
         row.className = "poi-row";
-        row.innerHTML = `<div class="name">${escapeHtml(t.name)}</div><div class="kind">${escapeHtml(kind)}</div>`;
+        row.innerHTML = `<div class="name">${escapeHtml(name)}</div><div class="kind">${escapeHtml(kind)}</div>`;
         row.onclick = () => {
-          map.flyTo({ center: [el.lon, el.lat], zoom: Math.max(map.getZoom(), 17) });
-          showFeaturePopup({ lng: el.lon, lat: el.lat }, t);
+          map.flyTo({ center: [lon, lat], zoom: Math.max(map.getZoom(), 17) });
+          showFeaturePopup({ lng: lon, lat }, p);
         };
         poiList.appendChild(row);
       }
     }
 
-    map.on("moveend", debouncedRefreshPois);
-    map.on("load", debouncedRefreshPois);
+    map.on("moveend", renderPoiPanel);
+    map.on("load", renderPoiPanel);
   </script>
 </body>
 </html>
