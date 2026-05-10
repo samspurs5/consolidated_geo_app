@@ -247,6 +247,40 @@ curl -X POST http://localhost:8000/data/reload
 
 ---
 
+## Switching regions
+
+To swap the loaded data — e.g. Monaco today, Greater Manchester tomorrow —
+use `switch-region.sh`. It stops the stack, drops the Overpass DB volume,
+clears the GraphHopper cache, fetches the new PBF (+ `state.txt` for
+incremental updates if available), and waits for both services to come back
+healthy.
+
+```bash
+# Geofabrik shorthand — anything under download.geofabrik.de
+./scripts/switch-region.sh europe/monaco
+./scripts/switch-region.sh europe/great-britain/england/greater-manchester
+
+# Or a full URL (any mirror)
+./scripts/switch-region.sh https://download.geofabrik.de/north-america/us/florida-latest.osm.pbf
+
+# Or a local PBF you already have
+./scripts/switch-region.sh /path/to/region.pbf
+```
+
+Useful flags:
+
+| Env var          | Effect                                                                |
+| ---------------- | --------------------------------------------------------------------- |
+| `REBUILD_TILES=1` | regenerate `data/tiles/region.pmtiles` via planetiler before bringing services back up |
+| `KEEP_OLD=1`      | save the previous PBF as `data/osm/region-previous.pbf` for rollback |
+| `HEALTH_TIMEOUT=N` | wait N seconds for healthy state (default 600; bump for large regions) |
+
+Initial ingest time scales with region size — Monaco is seconds, a UK
+county a few minutes, a US state 10–30 minutes. The script just waits;
+tail `docker compose logs -f` in another terminal if you want progress.
+
+---
+
 ## Worked example: synthetic delta
 
 This is the exact flow used to validate the stack end-to-end.
@@ -314,6 +348,7 @@ curl -s -G --data-urlencode \
 │   └── app/static/             # MapLibre frontend (HTML + style + JS deps)
 └── scripts/
     ├── download-extract.sh         # Fetch a Geofabrik PBF + state.txt
+    ├── switch-region.sh            # Swap the loaded region (Monaco -> Manchester etc.)
     ├── apply-local-delta.sh        # Apply .osc files via host osmium
     ├── build-tiles.sh              # Build .pmtiles from region.pbf via planetiler
     ├── fetch-frontend-vendor.sh    # Download MapLibre + pmtiles JS deps
