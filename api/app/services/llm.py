@@ -8,16 +8,94 @@ import json
 import logging
 import math
 import re
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from ollama import AsyncClient
+from pydantic import BaseModel, Field, ValidationError
 
 from ..config import settings
 from . import graphhopper as gh_svc
 from . import overpass as op_svc
 
 log = logging.getLogger(__name__)
+
+
+# ─── Tool argument validation ─────────────────────────────────────────────
+# Strict per-tool models. When the model emits malformed args (wrong type,
+# out-of-range value, missing required field) the validator's error is fed
+# back as the tool result so the model can self-correct on the next turn.
+
+Profile = Literal["car", "foot", "bike"]
+
+
+class _RouteArgs(BaseModel):
+    from_lat: float = Field(..., ge=-90, le=90)
+    from_lon: float = Field(..., ge=-180, le=180)
+    to_lat:   float = Field(..., ge=-90, le=90)
+    to_lon:   float = Field(..., ge=-180, le=180)
+    profile:  Profile = "car"
+
+
+class _IsochroneArgs(BaseModel):
+    lat:     float = Field(..., ge=-90, le=90)
+    lon:     float = Field(..., ge=-180, le=180)
+    minutes: float = Field(..., gt=0, le=120)
+    profile: Profile = "car"
+
+
+class _OverpassQueryArgs(BaseModel):
+    ql: str = Field(..., min_length=1)
+
+
+class _NearestAmenityArgs(BaseModel):
+    lat:         float = Field(..., ge=-90, le=90)
+    lon:         float = Field(..., ge=-180, le=180)
+    amenity:     str   = Field(..., min_length=1)
+    max_results: int   = Field(5, ge=1, le=50)
+    radius_m:    int   = Field(2000, ge=10, le=20000)
+
+
+class _ReachablePoisArgs(BaseModel):
+    lat:     float = Field(..., ge=-90, le=90)
+    lon:     float = Field(..., ge=-180, le=180)
+    minutes: float = Field(..., gt=0, le=120)
+    amenity: str   = Field(..., min_length=1)
+    profile: Profile = "foot"
+
+
+class _TourPlannerArgs(BaseModel):
+    amenity:        str     = Field(..., min_length=1)
+    min_distance_m: float   = Field(1000, gt=0, le=50000)
+    profile:        Profile = "foot"
+    max_stops:      int     = Field(8, ge=2, le=30)
+
+
+_ARG_MODELS: dict[str, type[BaseModel]] = {
+    "route":           _RouteArgs,
+    "isochrone":       _IsochroneArgs,
+    "overpass_query":  _OverpassQueryArgs,
+    "nearest_amenity": _NearestAmenityArgs,
+    "reachable_pois":  _ReachablePoisArgs,
+    "tour_planner":    _TourPlannerArgs,
+}
+
+
+def _validate_args(name: str, raw: dict) -> dict:
+    """Validate the raw tool args via the per-tool Pydantic model.
+    Returns a dict with defaults populated. Raises ValueError with a short
+    message the LLM can act on (loc + reason) if validation fails."""
+    model = _ARG_MODELS.get(name)
+    if model is None:
+        return raw  # unknown tool — _dispatch will raise
+    try:
+        return model.model_validate(raw).model_dump()
+    except ValidationError as e:
+        parts = []
+        for err in e.errors():
+            loc = ".".join(str(x) for x in err.get("loc", ())) or "<root>"
+            parts.append(f"{loc}: {err.get('msg', 'invalid')}")
+        raise ValueError(f"Invalid arguments for {name}: " + "; ".join(parts))
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -248,6 +326,21 @@ SYSTEM_PROMPT = (
     "  * Example — restaurants in view: `node[amenity=restaurant]({{bbox}});out body;`\n"
     "  * Example — named roads in view: `way[highway][name]({{bbox}});out geom;`\n"
     "\n"
+    "WORKED EXAMPLES (mimic the call shape, the wrapper validates args):\n"
+    "  User: \"route from 43.7396,7.4283 to 43.7333,7.4203 on foot\"\n"
+    "    → route({\"from_lat\": 43.7396, \"from_lon\": 7.4283, \"to_lat\": 43.7333, \"to_lon\": 7.4203, \"profile\": \"foot\"})\n"
+    "  User: \"how far can I walk in 15 minutes from 43.74,7.42?\"\n"
+    "    → isochrone({\"lat\": 43.74, \"lon\": 7.42, \"minutes\": 15, \"profile\": \"foot\"})\n"
+    "  User: \"nearest pharmacy to 43.74,7.42\"\n"
+    "    → nearest_amenity({\"lat\": 43.74, \"lon\": 7.42, \"amenity\": \"pharmacy\", \"max_results\": 5})\n"
+    "  User: \"cafes within a 10 minute walk of 43.74,7.42\"\n"
+    "    → reachable_pois({\"lat\": 43.74, \"lon\": 7.42, \"minutes\": 10, \"amenity\": \"cafe\", \"profile\": \"foot\"})\n"
+    "  User: \"plan a bar crawl over at least 1 km\"\n"
+    "    → tour_planner({\"amenity\": \"bar\", \"min_distance_m\": 1000, \"profile\": \"foot\"})\n"
+    "  User: \"show all parks in view\"\n"
+    "    → overpass_query({\"ql\": \"way[leisure=park]({{bbox}});out geom;\"})\n"
+    "\n"
+    "If a tool call returns an error, read it carefully and retry with corrected arguments. "
     "Reply briefly — the map renders results visually."
 )
 
@@ -528,6 +621,17 @@ async def chat(
                     args = json.loads(args)
                 except json.JSONDecodeError:
                     args = {}
+            # Validate first so malformed args become a tool-result error the
+            # model can read and self-correct on the next iteration, instead
+            # of hitting a downstream service with bad data.
+            try:
+                args = _validate_args(name, args)
+            except ValueError as ve:
+                err = str(ve)
+                log.warning("tool %s rejected: %s", name, err)
+                trace.append({"name": name, "arguments": args, "error": err})
+                messages.append({"role": "tool", "name": name, "content": json.dumps({"error": err})})
+                continue
             try:
                 summary, overlay = await _dispatch(name, args, http, bbox=bbox)
                 if overlay:
