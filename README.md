@@ -247,6 +247,78 @@ curl -X POST http://localhost:8000/data/reload
 
 ---
 
+## Live data feeds (MQTT)
+
+Real-time positions stream into the stack via a local Mosquitto broker.
+Anything published to `live/<provider>/<id>` as JSON appears on the map
+(as the orange "live" overlay) and in the LLM's `live_features` tool.
+
+Payload shape (JSON, on the broker):
+
+```json
+{
+  "id": "wolf-42",
+  "provider": "movebank",
+  "lat": 43.7396,
+  "lon": 7.4283,
+  "timestamp": "2026-05-10T12:34:56Z",
+  "properties": { "species": "Canis lupus", "speed_kmh": 12 }
+}
+```
+
+`provider` and `id` are filled in from the topic when omitted, so the
+smallest valid publish is `mosquitto_pub -t live/foo/42 -m '{"lat":1,"lon":2}'`.
+
+### How to feed data in
+
+Two paths, pick whichever fits your source:
+
+1. **Anything that speaks MQTT** — publish directly to the broker at
+   `mosquitto:1883` on the docker network (or expose the port and publish
+   from outside). No Python adapter needed.
+
+2. **Built-in provider adapters** for sources that don't speak MQTT.
+   Enable via `PROVIDERS=foo,bar` in `.env`. Currently shipped:
+
+   | Adapter         | Description                                     | Required env                                        |
+   | --------------- | ----------------------------------------------- | --------------------------------------------------- |
+   | `movebank`      | Polls Movebank REST; latest position per individual | `MOVEBANK_USERNAME`, `MOVEBANK_PASSWORD`, `MOVEBANK_STUDY_ID`, `MOVEBANK_POLL_SECONDS` (default 60) |
+   | `random_walker` | Demo: 3 random points drifting around a centre  | `WALKER_LAT`, `WALKER_LON` (defaults near Monaco)   |
+
+   Add another by writing a `Provider` subclass in
+   `api/app/providers/<name>.py` (poll loop publishes to MQTT), then a
+   branch in `api/app/providers/__init__.py:_build_enabled()` that maps
+   the env name to a constructor.
+
+### Pipeline
+
+```
+External publisher ─┐
+Built-in adapter ───┤  →  Mosquitto  ──→  api MQTT bridge ──→  WebSocket /live/ws  →  browser overlay
+                    ┘       (live/#)         in-memory cache
+                                                   │
+                                                   ▼
+                                          LLM tool: live_features
+```
+
+* The cache is the latest message per `(provider, id)` and evicts entries
+  older than `LIVE_MAX_AGE_S` (default 1 hour).
+* The browser maintains its own per-id keyed map so position updates
+  replace the previous marker rather than appending; redraws are
+  rAF-batched.
+* WebSocket reconnects with exponential backoff (1 s → 30 s).
+* The chat assistant gets a `live_features(provider?, max_age_s?)` tool
+  so the LLM can answer "where are the tracked wolves" or "any vehicles
+  nearby" using whatever's currently in the cache.
+
+```bash
+# Try it without any external source
+PROVIDERS=random_walker docker compose up -d
+open http://localhost:8000/ui/   # 3 orange dots drift around Monaco
+```
+
+---
+
 ## Switching regions
 
 To swap the loaded data — e.g. Monaco today, Greater Manchester tomorrow —

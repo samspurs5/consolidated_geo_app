@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import re
+import time
 from typing import Any, Literal
 
 import httpx
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from ..config import settings
 from . import graphhopper as gh_svc
+from . import live as live_svc
 from . import overpass as op_svc
 
 log = logging.getLogger(__name__)
@@ -78,6 +80,11 @@ class _AmenityPairsArgs(BaseModel):
     max_distance_m: float = Field(100, gt=0, le=5000)
 
 
+class _LiveFeaturesArgs(BaseModel):
+    provider:  str | None = None
+    max_age_s: int         = Field(3600, gt=0, le=86400)
+
+
 _ARG_MODELS: dict[str, type[BaseModel]] = {
     "route":           _RouteArgs,
     "isochrone":       _IsochroneArgs,
@@ -86,6 +93,7 @@ _ARG_MODELS: dict[str, type[BaseModel]] = {
     "reachable_pois":  _ReachablePoisArgs,
     "tour_planner":    _TourPlannerArgs,
     "amenity_pairs":   _AmenityPairsArgs,
+    "live_features":   _LiveFeaturesArgs,
 }
 
 
@@ -316,6 +324,25 @@ TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "live_features",
+            "description": (
+                "List the latest known positions from real-time providers feeding the MQTT broker "
+                "(e.g. movebank animal tracking, fleet GPS, sensor stations). Optionally filter by "
+                "provider name or maximum age. Returns features in the current map view. "
+                "Use for 'where are the tracked animals', 'show me live data', 'any vehicles nearby'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "provider":  {"type": "string", "description": "filter to one provider e.g. movebank, random_walker"},
+                    "max_age_s": {"type": "integer", "description": "include only features seen within N seconds, default 3600"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "amenity_pairs",
             "description": (
                 "Find pairs of amenities within a maximum distance of each other in the current map view. "
@@ -347,6 +374,7 @@ SYSTEM_PROMPT = (
     "  * 'X reachable in N minutes from a point' → reachable_pois\n"
     "  * 'plan a tour / crawl / hop through many X' → tour_planner\n"
     "  * 'X with a Y within Nm' / 'X near Y' → amenity_pairs (NEVER write Overpass set arithmetic)\n"
+    "  * 'where are the tracked …' / 'live data' / 'any vehicles' → live_features\n"
     "  * Anything else (custom tag combinations, ways, relations) → overpass_query\n"
     "\n"
     "OVERPASS QL RULES (the wrapper rejects malformed queries):\n"
@@ -581,6 +609,51 @@ async def _dispatch(
                 "geometry": {"type": "Point", "coordinates": [s["lon"], s["lat"]]},
             })
         overlay = {"kind": "tour", "geojson": {"type": "FeatureCollection", "features": features}}
+        return summary, overlay
+
+    if name == "live_features":
+        features = await live_svc.cache.snapshot()
+        cutoff = time.time() - int(args.get("max_age_s") or 3600)
+        provider = args.get("provider")
+        south = west = north = east = None
+        if bbox and len(bbox) == 4:
+            south, west, north, east = bbox
+        matched = []
+        for f in features:
+            if f.get("_received_ts", 0) < cutoff:
+                continue
+            if provider and f.get("provider") != provider:
+                continue
+            lat, lon = f.get("lat"), f.get("lon")
+            if lat is None or lon is None:
+                continue
+            if south is not None and not (south <= lat <= north and west <= lon <= east):
+                continue
+            matched.append(f)
+        summary = {
+            "count": len(matched),
+            "providers": sorted({f["provider"] for f in matched}),
+            "sample": [
+                {"id": f.get("id"), "provider": f.get("provider"),
+                 "lat": f.get("lat"), "lon": f.get("lon"),
+                 "timestamp": f.get("timestamp")}
+                for f in matched[:10]
+            ],
+        }
+        features_geojson = [
+            {
+                "type": "Feature",
+                "properties": {
+                    "id": f.get("id"),
+                    "provider": f.get("provider"),
+                    "timestamp": f.get("timestamp"),
+                    **(f.get("properties") or {}),
+                },
+                "geometry": {"type": "Point", "coordinates": [f["lon"], f["lat"]]},
+            }
+            for f in matched
+        ]
+        overlay = {"kind": "live", "geojson": {"type": "FeatureCollection", "features": features_geojson}}
         return summary, overlay
 
     if name == "amenity_pairs":

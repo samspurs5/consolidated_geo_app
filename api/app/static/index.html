@@ -161,7 +161,7 @@
     // (overlays are added on demand), MapLibre handles the binding lazily.
     const INTERACTIVE_LAYERS = [
       "ovp-points", "ovp-lines", "tour-stops", "tour-line", "route",
-      "iso-fill", "iso-outline",
+      "iso-fill", "iso-outline", "live-points",
     ];
 
     const escapeHtml = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
@@ -206,6 +206,7 @@
       iso:   { layers: ["iso-fill", "iso-outline"], source: "iso" },
       ovp:   { layers: ["ovp-lines", "ovp-points"], source: "ovp" },
       tour:  { layers: ["tour-line", "tour-stops"], source: "tour" },
+      live:  { layers: ["live-points"],            source: "live" },
     };
 
     const removeOverlay = key => {
@@ -238,6 +239,16 @@
           paint: { "line-color": "#a05", "line-width": 4, "line-opacity": 0.85 } },
         { id: "tour-stops", type: "circle", filter: ["==", ["geometry-type"], "Point"],
           paint: { "circle-radius": 7, "circle-color": "#a05", "circle-stroke-color": "#fff", "circle-stroke-width": 2 } },
+      ],
+      live: [
+        { id: "live-points", type: "circle",
+          paint: {
+            "circle-radius": 6,
+            "circle-color": "#f80",
+            "circle-stroke-color": "#fff",
+            "circle-stroke-width": 1.5,
+          },
+        },
       ],
     };
     // The "ovp" overlay holds whatever the user's last Overpass-y call
@@ -453,6 +464,79 @@
 
     map.on("moveend", renderPoiPanel);
     map.on("load", renderPoiPanel);
+
+    // ── 6. Live data feed (MQTT-backed WebSocket) ────────────────
+    // Per-id keyed cache so upserts replace the previous position rather
+    // than appending. Rebuilds the live overlay GeoJSON on every change;
+    // batched via rAF so a burst of upserts doesn't thrash the map.
+    const liveFeatures = new Map();   // key = "<provider>:<id>" -> GeoJSON feature
+    let liveRedrawScheduled = false;
+
+    function featureFromMsg(f) {
+      if (typeof f?.lat !== "number" || typeof f?.lon !== "number") return null;
+      return {
+        type: "Feature",
+        properties: {
+          id: f.id, provider: f.provider, timestamp: f.timestamp,
+          ...(f.properties || {}),
+        },
+        geometry: { type: "Point", coordinates: [f.lon, f.lat] },
+      };
+    }
+
+    function scheduleLiveRedraw() {
+      if (liveRedrawScheduled) return;
+      liveRedrawScheduled = true;
+      requestAnimationFrame(() => {
+        liveRedrawScheduled = false;
+        const geo = {
+          type: "FeatureCollection",
+          features: Array.from(liveFeatures.values()),
+        };
+        const src = map.getSource("live");
+        if (src) {
+          // Incremental: just refresh the data, don't rebuild layers
+          src.setData(geo);
+        } else {
+          drawOverlay("live", geo);
+        }
+      });
+    }
+
+    function ingestLiveMessage(msg) {
+      if (msg?.type === "snapshot") {
+        liveFeatures.clear();
+        for (const f of msg.features || []) {
+          const gf = featureFromMsg(f);
+          if (gf) liveFeatures.set(`${f.provider}:${f.id}`, gf);
+        }
+        scheduleLiveRedraw();
+      } else if (msg?.type === "upsert" && msg.feature) {
+        const gf = featureFromMsg(msg.feature);
+        if (gf) {
+          liveFeatures.set(`${msg.feature.provider}:${msg.feature.id}`, gf);
+          scheduleLiveRedraw();
+        }
+      }
+    }
+
+    let liveReconnectMs = 1000;
+    function connectLive() {
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      const ws = new WebSocket(`${proto}//${location.host}/live/ws`);
+      ws.onopen = () => { liveReconnectMs = 1000; };
+      ws.onmessage = e => {
+        try { ingestLiveMessage(JSON.parse(e.data)); }
+        catch (err) { /* ignore malformed frames */ }
+      };
+      ws.onclose = () => {
+        // Exponential backoff up to 30 s
+        setTimeout(connectLive, liveReconnectMs);
+        liveReconnectMs = Math.min(liveReconnectMs * 2, 30000);
+      };
+      ws.onerror = () => ws.close();
+    }
+    connectLive();
   </script>
 </body>
 </html>

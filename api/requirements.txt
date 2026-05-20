@@ -9,3 +9,4 @@ aiofiles>=23.0.0
 python-multipart>=0.0.9
 ollama>=0.4.0
 fastapi-mcp>=0.3.0
+aiomqtt>=2.0.0

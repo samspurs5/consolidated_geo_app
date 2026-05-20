@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     ollama_url: str = "http://ollama:11434"
     ollama_model: str = "qwen2.5:3b"
 
+    # Live-data MQTT broker
+    mqtt_host: str = "mosquitto"
+    mqtt_port: int = 1883
+    # How long a feature stays in the live cache without an update
+    live_max_age_s: int = 3600
+
     class Config:
         env_file = ".env"
 

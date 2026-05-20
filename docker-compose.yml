@@ -83,6 +83,24 @@ services:
       retries: 10
       start_period: 300s
 
+  # ── Mosquitto (MQTT broker for live data feeds) ──────────────
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    restart: unless-stopped
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+    networks:
+      - geo-net
+    # Quietly verify the broker accepts subscriptions on its $SYS topic.
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h localhost -t '$$SYS/#' -C 1 -W 5 >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+
   # ── Ollama (local LLM for the chat assistant) ────────────────
   ollama:
     image: ollama/ollama:latest
@@ -129,6 +147,16 @@ services:
       GRAPHHOPPER_CACHE_DIR: "/data/default-gh"
       OLLAMA_URL: "http://ollama:11434"
       OLLAMA_MODEL: "${OLLAMA_MODEL:-qwen2.5:3b}"
+      MQTT_HOST: "mosquitto"
+      MQTT_PORT: "1883"
+      # Comma-separated list of provider adapters to start. Each provider
+      # subscribes to its upstream source and republishes to live/<name>/<id>
+      # on the broker. Empty -> external publishers only.
+      PROVIDERS: "${PROVIDERS:-}"
+      MOVEBANK_USERNAME: "${MOVEBANK_USERNAME:-}"
+      MOVEBANK_PASSWORD: "${MOVEBANK_PASSWORD:-}"
+      MOVEBANK_STUDY_ID: "${MOVEBANK_STUDY_ID:-}"
+      MOVEBANK_POLL_SECONDS: "${MOVEBANK_POLL_SECONDS:-60}"
     volumes:
       - osm-data:/data/osm              # read + write (delta application)
       - ./data/tiles:/data/tiles:ro     # vector tiles (.pmtiles) for the frontend
@@ -139,6 +167,7 @@ services:
       - overpass
       - graphhopper
       - ollama
+      - mosquitto
     networks:
       - geo-net
 
@@ -156,6 +185,9 @@ volumes:
 
   # Persists pulled Ollama models between container recreations
   ollama-data:
+
+  # Persists retained MQTT messages between broker restarts
+  mosquitto-data:
 
 networks:
   geo-net:

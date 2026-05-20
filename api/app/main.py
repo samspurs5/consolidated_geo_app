@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -7,15 +9,30 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import settings
-from .routers import chat, data, overpass, route
+from .providers import start_all as start_providers
+from .routers import chat, data, live, overpass, route
+from .services import live as live_svc
+
+log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.http = httpx.AsyncClient(timeout=60.0)
     settings.updates_dir.mkdir(parents=True, exist_ok=True)
-    yield
-    await app.state.http.aclose()
+
+    # Live data: one task bridges MQTT → cache → WebSocket fanout; provider
+    # adapters run independently and publish to the same broker.
+    bridge_task = asyncio.create_task(live_svc.mqtt_loop(), name="mqtt-bridge")
+    provider_tasks = await start_providers()
+    background = [bridge_task, *provider_tasks]
+    try:
+        yield
+    finally:
+        for t in background:
+            t.cancel()
+        await asyncio.gather(*background, return_exceptions=True)
+        await app.state.http.aclose()
 
 
 app = FastAPI(
@@ -33,6 +50,7 @@ app.include_router(route.router, prefix="/route", tags=["routing"])
 app.include_router(overpass.router, prefix="/overpass", tags=["overpass"])
 app.include_router(data.router, prefix="/data", tags=["data"])
 app.include_router(chat.router, prefix="/chat", tags=["chat"])
+app.include_router(live.router, prefix="/live", tags=["live"])
 
 # Expose routing + overpass tools to external MCP clients (e.g. Claude
 # Desktop) at /mcp. The /chat endpoint above uses Ollama's native
